@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Il Taglio del Drago</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Yuji+Syuku&family=Shippori+Mincho:wght@500;800&display=swap" rel="stylesheet">
+<style>
+  :root{ --paper:#ece2cc; --ink:#1b1714; --red:#c23b22; --bg:#0e0c0b; --muted:#9b8f7c; color-scheme:dark }
+  @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){ --paper:#ece2cc; --ink:#1b1714; --red:#c23b22; --bg:#0e0c0b; --muted:#9b8f7c } }
+  :root[data-theme="dark"]{ --paper:#ece2cc; --ink:#1b1714; --red:#c23b22; --bg:#0e0c0b; --muted:#9b8f7c }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--paper);font-family:"Shippori Mincho",Georgia,serif;overflow:hidden}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  #stage{position:relative;aspect-ratio:16/9;width:min(100vw,calc(100vh*16/9));max-width:100%;container-type:size;background:var(--paper)}
+  canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+  #start{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2.6cqh;background:rgba(236,226,204,.55);z-index:3}
+  #start .k{font-family:"Yuji Syuku",serif;font-size:7cqw;color:var(--ink);line-height:1}
+  #start h1{margin:0;font-weight:800;font-size:3.4cqw;color:var(--ink);letter-spacing:.06em}
+  #start p{margin:0;color:#4a3f35;font-size:1.5cqw}
+  #play{all:unset;cursor:pointer;padding:1.4cqh 2.8cqw;background:var(--red);color:var(--paper);font-weight:800;font-size:1.7cqw;letter-spacing:.12em;border-radius:2px;box-shadow:0 .6cqw 2cqw rgba(120,30,10,.35)}
+  #play:focus-visible,#ctl button:focus-visible{outline:3px solid var(--ink);outline-offset:4px}
+  #ctl{position:absolute;left:0;right:0;bottom:0;display:flex;gap:1cqw;align-items:center;padding:1cqh 2cqw;opacity:0;transition:opacity .3s;background:linear-gradient(transparent,rgba(27,23,20,.6));z-index:2}
+  #stage:hover #ctl,#ctl:focus-within{opacity:1}
+  #ctl button{all:unset;cursor:pointer;color:var(--paper);font-size:max(13px,1.3cqw);padding:.4em .8em;border:1px solid rgba(236,226,204,.5)}
+  #bar{flex:1;height:5px;background:rgba(236,226,204,.3);cursor:pointer;position:relative}
+  #bar i{position:absolute;left:0;top:0;bottom:0;background:var(--red);width:0}
+  body.render #ctl,body.render #start{display:none}
+  body.render #wrap{inset:auto;left:0;top:0;width:1280px;height:720px} body.render #stage{width:1280px}
+</style>
+</head>
+<body>
+<div id="wrap"><div id="stage">
+  <canvas id="c" width="1280" height="720"></canvas>
+  <div id="start"><div class="k">龍斬</div><h1>Il Taglio del Drago</h1><p>Un cortometraggio a inchiostro · 48 secondi · con audio</p><button id="play">GUARDA</button></div>
+  <div id="ctl"><button id="pp">Pausa</button><button id="rs">Da capo</button><div id="bar"><i></i></div></div>
+</div></div>
+<script>
+'use strict';
+const RENDER = new URLSearchParams(location.search).has('render');
+if (RENDER) document.body.classList.add('render');
+const W = 1280, H = 720, DUR = 48;
+const cv = document.getElementById('c'), g = cv.getContext('2d');
+
+/* ---------------- math ---------------- */
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a)); return t * t * (3 - 2 * t); };
+const seg = (t, a, b) => clamp((t - a) / (b - a));
+const pulse = (t, a, b, fi = .3, fo = .3) => sstep(a, a + fi, t) * (1 - sstep(b - fo, b, t));
+const easeOut = x => 1 - Math.pow(1 - x, 3), easeIn = x => x * x * x, easeInOut = x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+function rng(seed) { return function () { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const h1 = x => { const s = Math.sin(x * 127.1) * 43758.5453; return s - Math.floor(s); };
+const n1 = x => { const i = Math.floor(x), f = x - i, u = f * f * (3 - 2 * f); return lerp(h1(i), h1(i + 1), u); };
+const fbm1 = x => n1(x) * .55 + n1(x * 2.1 + 3) * .28 + n1(x * 4.3 + 7) * .17;
+const sn = (x, s = 0) => n1(x + s * 31.7) * 2 - 1;
+
+/* ---------------- palette ---------------- */
+const INK = a => `rgba(27,23,20,${a})`, PAPER = a => `rgba(236,226,204,${a})`, RED = a => `rgba(194,59,34,${a})`;
+
+/* ---------------- canvases ---------------- */
+function mk() { const c = document.createElement('canvas'); c.width = W; c.height = H; return c; }
+const bgC = mk(), bg = bgC.getContext('2d');
+const paperC = mk();
+{ const p = paperC.getContext('2d'); p.fillStyle = '#ece2cc'; p.fillRect(0, 0, W, H);
+  const id = p.getImageData(0, 0, W, H), d = id.data, r = rng(9);
+  for (let i = 0; i < d.length; i += 4) { const v = (r() - .5) * 14 + (n1((i / 4 % W) * .02) - .5) * 6; d[i] += v; d[i + 1] += v; d[i + 2] += v * .9; }
+  p.putImageData(id, 0, 0);
+  for (let k = 0; k < 900; k++) { const x = r() * W, y = r() * H, l = 6 + r() * 26, a = r() * 6.28; p.strokeStyle = `rgba(120,100,70,${.04 + r() * .06})`; p.lineWidth = .6; p.beginPath(); p.moveTo(x, y); p.quadraticCurveTo(x + Math.cos(a) * l * .5 + 3, y + Math.sin(a) * l * .5, x + Math.cos(a) * l, y + Math.sin(a) * l); p.stroke(); }
+  const vg = p.createRadialGradient(W / 2, H / 2, H * .35, W / 2, H / 2, H * .95); vg.addColorStop(0, 'rgba(90,70,40,0)'); vg.addColorStop(1, 'rgba(90,70,40,.28)'); p.fillStyle = vg; p.fillRect(0, 0, W, H); }
+
+/* ---------------- brush helpers ---------------- */
+// variable-width stroke along a polyline: pts [[x,y],...], wf(s)->width
+function brush(c, pts, wf, color, rough = .15, seed = 1) {
+  const n = pts.length; if (n < 2) return; const L = [], R = [];
+  for (let i = 0; i < n; i++) {
+    const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)]; let dx = b[0] - a[0], dy = b[1] - a[1]; const l = Math.hypot(dx, dy) || 1; dx /= l; dy /= l;
+    const s = i / (n - 1), w = wf(s) * (1 + sn(i * .7, seed) * rough) / 2;
+    L.push([pts[i][0] - dy * w, pts[i][1] + dx * w]); R.push([pts[i][0] + dy * w, pts[i][1] - dx * w]);
+  }
+  c.beginPath(); c.moveTo(L[0][0], L[0][1]); for (const p of L) c.lineTo(p[0], p[1]); for (let i = n - 1; i >= 0; i--) c.lineTo(R[i][0], R[i][1]); c.closePath(); c.fillStyle = color; c.fill();
+}
+const taper = (a = .15, b = .25) => s => sstep(0, a, s) * (1 - sstep(1 - b, 1, s)) * .85 + .15;
+function curve(p0, p1, p2, n = 24) { const o = []; for (let i = 0; i <= n; i++) { const t = i / n, u = 1 - t; o.push([u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0], u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1]]); } return o; }
+function cubic(p0, p1, p2, p3, n = 30) { const o = []; for (let i = 0; i <= n; i++) { const t = i / n, u = 1 - t; o.push([u * u * u * p0[0] + 3 * u * u * t * p1[0] + 3 * u * t * t * p2[0] + t * t * t * p3[0], u * u * u * p0[1] + 3 * u * u * t * p1[1] + 3 * u * t * t * p2[1] + t * t * t * p3[1]]); } return o; }
+function poly(c, pts, fill) { c.beginPath(); c.moveTo(pts[0][0], pts[0][1]); for (const p of pts) c.lineTo(p[0], p[1]); c.closePath(); c.fillStyle = fill; c.fill(); }
+function blob(c, x, y, rx, ry, col, rot = 0) { c.beginPath(); c.ellipse(x, y, rx, ry, rot, 0, Math.PI * 2); c.fillStyle = col; c.fill(); }
+
+/* ---------------- camera ---------------- */
+let cam = { x: 640, y: 360, z: 1 }, shake = 0;
+function camT(c, d) { const z = 1 + (cam.z - 1) * d, cx = W / 2 + (cam.x - W / 2) * d, cy = H / 2 + (cam.y - H / 2) * d; c.setTransform(z, 0, 0, z, W / 2 - cx * z + shake * sn(T * 23, 1) * 9, H / 2 - cy * z + shake * sn(T * 21, 2) * 9); }
+let T = 0;
+
+/* ---------------- landscape ---------------- */
+const cone = (x, px, h, w) => { const d = Math.abs(x - px) / w; return d < 1 ? h * Math.pow(1 - d, 1.5) : 0; };
+function ridge(c, o) {
+  const top = []; for (let x = -200; x <= W + 200; x += 4) { let y = o.y - o.amp * fbm1(x / o.sc + o.seed); for (const p of o.peaks || []) y -= cone(x, p[0], p[1], p[2]) * (1 + .08 * sn(x * .05, o.seed)); top.push([x, y]); }
+  c.beginPath(); c.moveTo(-200, H + 200); for (const p of top) c.lineTo(p[0], p[1]); c.lineTo(W + 200, H + 200); c.closePath();
+  const minY = Math.min(...top.map(p => p[1]));
+  const gr = c.createLinearGradient(0, minY, 0, o.y + o.fade); gr.addColorStop(0, INK(o.a)); gr.addColorStop(.45, INK(o.a * .55)); gr.addColorStop(1, INK(0)); c.fillStyle = gr; c.fill();
+  c.beginPath(); top.forEach((p, i) => i ? c.lineTo(p[0], p[1]) : c.moveTo(p[0], p[1])); c.strokeStyle = INK(o.a * .9); c.lineWidth = o.lw || 1.6; c.stroke();
+  const r = rng(o.seed * 100 | 0); // texture strokes (cun)
+  for (let k = 0; k < (o.cun || 0); k++) { const i = Math.floor(r() * top.length), p = top[i], l = 20 + r() * 60; c.strokeStyle = INK(o.a * (.25 + r() * .3)); c.lineWidth = .8 + r(); c.beginPath(); c.moveTo(p[0], p[1] + 2); c.quadraticCurveTo(p[0] + (r() - .5) * 20, p[1] + l * .5, p[0] + (r() - .5) * 30, p[1] + l); c.stroke(); }
+}
+function mist(c, y, h, a, speed, seed) { const r = rng(seed); for (let k = 0; k < 8; k++) { const x = ((r() * 1800 + T * speed) % 1900) - 300, yy = y + (r() - .5) * h, rx = 220 + r() * 220, ry = h * (.5 + r() * .5); const gr = c.createRadialGradient(x, yy, 0, x, yy, rx); gr.addColorStop(0, PAPER(a)); gr.addColorStop(.6, PAPER(a * .6)); gr.addColorStop(1, PAPER(0)); c.save(); c.translate(x, yy); c.scale(1, ry / rx); c.translate(-x, -yy); c.fillStyle = gr; c.beginPath(); c.arc(x, yy, rx, 0, 7); c.fill(); c.restore(); } }
+
+/* ---------------- dragon ---------------- */
+function catmull(P, n = 16) { const o = []; for (let i = 0; i < P.length - 1; i++) { const p0 = P[Math.max(0, i - 1)], p1 = P[i], p2 = P[i + 1], p3 = P[Math.min(P.length - 1, i + 2)]; for (let k = 0; k < n; k++) { const t = k / n, t2 = t * t, t3 = t2 * t; o.push([.5 * (2 * p1[0] + (-p0[0] + p2[0]) * t + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3), .5 * (2 * p1[1] + (-p0[1] + p2[1]) * t + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)]); } } o.push(P[P.length - 1]); return o; }
+function arcTable(pts) { const d = [0]; for (let i = 1; i < pts.length; i++) d.push(d[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1])); return d; }
+function atU(pts, d, u) { u = clamp(u, 0, d[d.length - 1]); let lo = 0, hi = d.length - 1; while (hi - lo > 1) { const m = (lo + hi) >> 1; if (d[m] < u) lo = m; else hi = m; } const f = (u - d[lo]) / ((d[hi] - d[lo]) || 1); return [lerp(pts[lo][0], pts[hi][0], f), lerp(pts[lo][1], pts[hi][1], f)]; }
+// far flight path
+const farPath = (() => { const P = []; for (let u = 0; u <= 1500; u += 10) { P.push([u - 340, 250 + 46 * Math.sin(u / 85) - Math.max(0, u - 1000) * 0 + Math.pow(Math.max(0, u - 1050), 2) * .0042]); } return P; })();
+const farD = arcTable(farPath);
+const nearPath = catmull([[150, 1250], [170, 980], [330, 760], [250, 590], [330, 450], [470, 400], [520, 300], [610, 235]], 18);
+const nearD = arcTable(nearPath);
+const NEAR_END = nearD[nearD.length - 1];
+function dragonPose(t) {
+  if (t < 18.4) { const u = (t - 10.5) * 175 + 400; return { path: farPath, d: farD, u, L: 360, w0: 11, hs: .23, mouth: .1, a: .78, wob: 6, dir: 1 }; }
+  const e = easeOut(seg(t, 19.2, 20.15)); const u = lerp(NEAR_END - 1500, NEAR_END, e) + Math.sin(t * 1.3) * 6;
+  return { path: nearPath, d: nearD, u, L: 1180, w0: 50, hs: 1.05, mouth: .25 + .75 * pulse(t, 19.6, 21.0, .2, .5) + .45 * pulse(t, 31.4, 33.4, .1, .8), a: 1, wob: 14, dir: 1 };
+}
+function spine(P, n = 90) { const pts = []; for (let i = 0; i <= n; i++) { const s = i / n; const p = atU(P.path, P.d, P.u - s * P.L); const q = atU(P.path, P.d, P.u - s * P.L - 4); let nx = -(p[1] - q[1]), ny = p[0] - q[0]; const l = Math.hypot(nx, ny) || 1; nx /= l; ny /= l; const wv = P.wob * Math.sin(s * 9 - T * 3) * sstep(0, .15, s); pts.push([p[0] + nx * wv, p[1] + ny * wv]); } return pts; }
+function drawDragon(c, P, alpha = 1) {
+  if (P.u < -100) return; const pts = spine(P), n = pts.length - 1; c.save(); c.globalAlpha = P.a * alpha;
+  const wf = s => P.w0 * (s < .06 ? lerp(.8, 1, s / .06) : 1) * Math.pow(1 - s, .55) * (1 + .12 * Math.sin(s * 30));
+  // legs
+  for (const [s, side] of [[.17, 1], [.2, -1], [.5, 1], [.53, -1]]) { const i = Math.round(s * n), p = pts[i], q = pts[i + 1]; let dx = q[0] - p[0], dy = q[1] - p[1]; const l = Math.hypot(dx, dy) || 1; dx /= l; dy /= l; const nx = -dy * side, ny = dx * side; const k = P.w0 * .9;
+    const knee = [p[0] + nx * k * 1.1 - dx * k * .3, p[1] + ny * k * 1.1 - dy * k * .3], foot = [knee[0] + nx * k * .3 - dx * k * .9, knee[1] + ny * k * .3 - dy * k * .9 + k * .3];
+    brush(c, curve(p, knee, foot, 10), x => P.w0 * .36 * (1 - x * .5), INK(.95), .1, i);
+    for (let f = -1; f <= 1; f++) brush(c, curve(foot, [foot[0] - dx * k * .3 + f * k * .12, foot[1] - dy * k * .3 + k * .15], [foot[0] - dx * k * .45 + f * k * .2, foot[1] + k * .35], 6), x => P.w0 * .08 * (1 - x), INK(1), 0); }
+  // body
+  brush(c, pts, wf, INK(.94), .04, 3);
+  // belly band & scales
+  const bel = pts.map((p, i) => { const q = pts[Math.min(n, i + 1)], o = pts[Math.max(0, i - 1)]; let nx = -(q[1] - o[1]), ny = q[0] - o[0]; const l = Math.hypot(nx, ny) || 1; return [p[0] + nx / l * wf(i / n) * .26, p[1] + ny / l * wf(i / n) * .26]; });
+  brush(c, bel, s => wf(s) * .38, PAPER(.23), .1, 5);
+  c.strokeStyle = PAPER(.32); c.lineWidth = Math.max(.6, P.w0 * .04);
+  for (let i = 3; i < n - 2; i += 2) { const p = pts[i], q = pts[i + 1]; const ang = Math.atan2(q[1] - p[1], q[0] - p[0]); const r = wf(i / n) * .28; for (const off of [-.25, .05]) { const ox = -Math.sin(ang) * wf(i / n) * off, oy = Math.cos(ang) * wf(i / n) * off; c.beginPath(); c.arc(p[0] + ox, p[1] + oy, r, ang + Math.PI * .55, ang + Math.PI * 1.45); c.stroke(); } }
+  // dorsal spikes
+  for (let i = 4; i < n - 3; i += 3) { const p = pts[i], q = pts[i + 1]; let dx = q[0] - p[0], dy = q[1] - p[1]; const l = Math.hypot(dx, dy) || 1; dx /= l; dy /= l; const w = wf(i / n) * .5, sp = P.w0 * .5 * (1 - i / n); const b = [p[0] + dy * w, p[1] - dx * w]; poly(c, [[b[0] - dx * sp * .4, b[1] - dy * sp * .4], [b[0] + dy * sp + dx * sp * .5, b[1] - dx * sp + dy * sp * .5], [b[0] + dx * sp * .5, b[1] + dy * sp * .5]], INK(.95)); }
+  // tail flame
+  { const p = pts[n], q = pts[n - 2]; const a = Math.atan2(p[1] - q[1], p[0] - q[0]); for (let k = -2; k <= 2; k++) { const l = P.w0 * (1.6 - Math.abs(k) * .3); brush(c, curve(p, [p[0] + Math.cos(a + k * .25) * l * .5, p[1] + Math.sin(a + k * .25) * l * .5 + Math.sin(T * 5 + k) * 4], [p[0] + Math.cos(a + k * .35) * l, p[1] + Math.sin(a + k * .35) * l], 8), x => P.w0 * .16 * (1 - x), INK(.85), 0); } }
+  // head
+  const p0 = pts[0], p1 = pts[3]; const ha = Math.atan2(p0[1] - p1[1], p0[0] - p1[0]); const hs = P.hs * 60;
+  c.save(); c.translate(p0[0], p0[1]); c.rotate(ha); c.scale(hs / 60, hs / 60);
+  // mane
+  for (let k = 0; k < 9; k++) { const a = Math.PI * (.55 + k * .11), l = 70 + (k % 3) * 18; brush(c, curve([-10, 0], [-30 + Math.cos(a) * l * .5, Math.sin(a) * l * .5 - 10], [-55 + Math.cos(a) * l, Math.sin(a) * l * .7 + Math.sin(T * 4 + k) * 6 - 20], 10), x => 9 * (1 - x), INK(.92), .1, k); }
+  // horns
+  for (const s of [-1, 1]) brush(c, curve([0, -18 * s], [-30, -48 * s], [-70, -52 * s + 10 * s], 12), x => 9 * (1 - x * .85), INK(1), .05);
+  // skull + snout
+  const m = P.mouth;
+  c.beginPath(); c.moveTo(-14, -26); c.quadraticCurveTo(20, -38, 48, -20); c.quadraticCurveTo(78, -18, 92, -6); c.lineTo(90, 2); c.quadraticCurveTo(50, 4, 20, 8); c.quadraticCurveTo(-8, 18, -16, 14); c.closePath(); c.fillStyle = INK(1); c.fill();
+  // lower jaw
+  c.save(); c.translate(10, 6); c.rotate(m * .55); c.beginPath(); c.moveTo(-10, 0); c.quadraticCurveTo(40, 6, 74, 4); c.lineTo(72, 12); c.quadraticCurveTo(30, 26, -12, 16); c.closePath(); c.fillStyle = INK(1); c.fill();
+  c.fillStyle = PAPER(.9); for (let k = 0; k < 6; k++) { c.beginPath(); c.moveTo(18 + k * 9, 2); c.lineTo(22 + k * 9, -6); c.lineTo(26 + k * 9, 2); c.fill(); }
+  c.restore();
+  c.fillStyle = PAPER(.85); for (let k = 0; k < 6; k++) { c.beginPath(); c.moveTo(26 + k * 10, 4); c.lineTo(30 + k * 10, 12 + m * 3); c.lineTo(34 + k * 10, 4); c.fill(); }
+  // brow ridge, nostril, eye
+  brush(c, curve([-4, -24], [20, -36], [38, -24], 10), x => 4 * (1 - x * .5), PAPER(.35), 0);
+  blob(c, 84, -10, 3, 2, PAPER(.5));
+  blob(c, 22, -18, 8, 5.5, RED(.95)); blob(c, 23, -18, 2.4, 4.5, INK(1)); blob(c, 20, -20, 1.6, 1.6, PAPER(.95));
+  // whiskers
+  for (const s of [-1, 1]) brush(c, cubic([78, -2 * s], [60, 40 * s + Math.sin(T * 3) * 10], [-20, 60 * s + Math.sin(T * 2.2 + s) * 20], [-120, 50 * s + Math.sin(T * 2.6 + s) * 30], 26), x => 3.5 * (1 - x), INK(.9), 0);
+  c.restore();
+  c.restore();
+  return pts;
+}
+
+/* ---------------- samurai ---------------- */
+// origin = feet, facing left. pose: {mode:'stand'|'iai'|'slash'|'sheath', p:0..1, wind}
+const PEAK = [1003, 432];
+function drawSamurai(c, x, y, s, pose) {
+  c.save(); c.translate(x, y); c.scale(s, s); const w = T;
+  const crouch = pose.mode === 'iai' ? 1 : pose.mode === 'slash' ? .75 : pose.mode === 'sheath' ? .75 * (1 - pose.p) : 0;
+  c.translate(0, crouch * 4); c.scale(1, 1 - crouch * .06);
+  const fl = Math.sin(w * 3.1) * 4 + Math.sin(w * 7.3) * 1.5 + (pose.gust || 0) * 8;
+  // scarf
+  { const pts = []; for (let i = 0; i <= 20; i++) { const u = i / 20; pts.push([6 + u * 62, -79 + u * 6 + Math.sin(u * 6 - w * 6) * 5 * u + Math.sin(w * 2) * 2 * u]); } brush(c, pts, q => 4.2 * (1 - q * .6), RED(.95), .1, 2); }
+  // back sleeve
+  poly(c, [[2, -78], [16, -77], [28 + fl, -58], [22 + fl * .7, -47], [8, -51]], INK(.82));
+  // hakama
+  poly(c, [[-9 - crouch * 3, -45], [11, -45], [20 + fl * .5, 0], [8, 1], [2, -10], [-5, 1], [-19 - crouch * 4, 0]], INK(.96));
+  c.strokeStyle = PAPER(.22); c.lineWidth = .8; for (const k of [-10, -2, 6, 13]) { c.beginPath(); c.moveTo(k * .6, -43); c.lineTo(k + (k > 0 ? fl * .3 : 0), -2); c.stroke(); }
+  // torso
+  poly(c, [[-10, -45], [11, -45], [12, -79], [-11, -79]], INK(.88));
+  brush(c, [[-8, -79], [-2, -62], [3, -48]], () => 2, PAPER(.6), 0); // collar
+  poly(c, [[-11, -50], [12, -50], [12, -44], [-11, -44]], 'rgba(70,60,52,.95)'); // obi
+  // saya (scabbard) backward from hip
+  const mouth = [-9, -49], sdir = [Math.cos(.2), Math.sin(.2)];
+  // sword
+  let tsuba, bladeDir, bladeVis = 0, hand;
+  if (pose.mode === 'slash') { hand = [-40, -66]; bladeDir = [-Math.cos(-.08), Math.sin(-.08)]; tsuba = [hand[0] - 4, hand[1]]; bladeVis = 74; }
+  else if (pose.mode === 'sheath') {
+    const p = pose.p, a = clamp(p / .55), b = clamp((p - .55) / .45);
+    const ang0 = Math.PI + .08, ang1 = .2; const ang = lerp(ang0, ang1 + Math.PI * 2 * 0, easeInOut(a)) ; const ag = a < 1 ? lerp(ang0, Math.PI * 2 + ang1, easeInOut(a)) : ang1;
+    bladeDir = [Math.cos(ag), Math.sin(ag)];
+    const ins = 74 * easeInOut(b);
+    const tA = [lerp(-44, mouth[0] - 74, easeInOut(a)), lerp(-66, mouth[1] - 74 * sdir[1], easeInOut(a))];
+    tsuba = b > 0 ? [mouth[0] - sdir[0] * (74 - ins), mouth[1] - sdir[1] * (74 - ins)] : tA; bladeVis = 74; hand = [tsuba[0] - 5, tsuba[1] - 1];
+  } else { tsuba = mouth; bladeDir = sdir; bladeVis = 0; hand = pose.mode === 'iai' ? [-16, -53] : null; }
+  if (bladeVis > 0) { const tip = [tsuba[0] + bladeDir[0] * bladeVis, tsuba[1] + bladeDir[1] * bladeVis];
+    c.lineCap = 'round'; c.strokeStyle = INK(1); c.lineWidth = 3.2; c.beginPath(); c.moveTo(tsuba[0], tsuba[1]); c.lineTo(tip[0], tip[1]); c.stroke();
+    c.strokeStyle = '#fbf6ea'; c.lineWidth = 1.6; c.beginPath(); c.moveTo(tsuba[0] + bladeDir[0] * 3, tsuba[1] + bladeDir[1] * 3 - .6); c.lineTo(tip[0], tip[1] - .3); c.stroke(); }
+  // saya drawn over the blade
+  brush(c, [mouth, [mouth[0] + sdir[0] * 80, mouth[1] + sdir[1] * 80]], q => 4.2 - q * .8, INK(1), 0);
+  blob(c, mouth[0] + 1, mouth[1], 1.4, 2.6, PAPER(.7));
+  // hilt
+  { const back = bladeVis > 0 ? [-bladeDir[0], -bladeDir[1]] : [-Math.cos(-.35), Math.sin(-.35)]; const t0 = bladeVis > 0 ? tsuba : mouth;
+    brush(c, [t0, [t0[0] + back[0] * 22, t0[1] + back[1] * 22]], () => 3.6, INK(1), 0); blob(c, t0[0], t0[1], 1.6, 4.2, INK(1), Math.atan2(back[1], back[0])); }
+  // front sleeve + arm
+  if (hand) { brush(c, curve([-2, -76], [lerp(-4, hand[0], .4), lerp(-70, hand[1], .5)], hand, 10), q => 9 - q * 5, INK(.9), .1, 4); blob(c, hand[0], hand[1], 3, 2.6, INK(1)); poly(c, [[-4, -78], [6, -77], [lerp(0, hand[0], .45) + fl * .3, lerp(-70, hand[1], .45) + 10], [lerp(-6, hand[0], .4), lerp(-66, hand[1], .4) + 6]], INK(.85)); }
+  else poly(c, [[-6, -78], [8, -77], [14 + fl * .6, -54], [2 + fl * .4, -46], [-6, -52]], INK(.9));
+  // head + kasa
+  blob(c, -1, -86, 6.5, 7, INK(.95));
+  c.beginPath(); c.moveTo(-28, -84); c.quadraticCurveTo(-12, -90, 0, -102); c.quadraticCurveTo(12, -90, 28, -84); c.quadraticCurveTo(0, -86, -28, -84); c.fillStyle = 'rgba(64,52,40,.95)'; c.fill();
+  c.strokeStyle = PAPER(.22); c.lineWidth = .7; for (let k = -3; k <= 3; k++) { c.beginPath(); c.moveTo(0, -101); c.lineTo(k * 8, -85); c.stroke(); }
+  c.restore();
+}
+function drawCrag(c) {
+  const P = [[860, 780], [880, 690], [912, 640], [925, 590], [948, 545], [962, 492], [985, 450], [992, 433], [1016, 431], [1030, 455], [1050, 470], [1075, 520], [1092, 560], [1120, 610], [1150, 650], [1190, 700], [1220, 780]];
+  c.beginPath(); c.moveTo(P[0][0], P[0][1]); for (const p of P) c.lineTo(p[0], p[1]); c.closePath();
+  const gr = c.createLinearGradient(0, 430, 0, 780); gr.addColorStop(0, INK(.92)); gr.addColorStop(.6, INK(.55)); gr.addColorStop(1, INK(.05)); c.fillStyle = gr; c.fill();
+  const r = rng(77); c.lineCap = 'round';
+  for (let k = 0; k < 40; k++) { const i = 1 + Math.floor(r() * (P.length - 3)), p = P[i], q = P[i + 1], u = r(); const x = lerp(p[0], q[0], u), y = lerp(p[1], q[1], u); const l = 25 + r() * 60; c.strokeStyle = PAPER(.12 + r() * .14); c.lineWidth = 1 + r() * 1.5; c.beginPath(); c.moveTo(x + (x < 1000 ? 6 : -6), y + 6); c.quadraticCurveTo(x + (r() - .5) * 20, y + l * .5, x + (x < 1000 ? 18 : -18) * r(), y + l); c.stroke(); }
+  // pine tree on the crag
+  const base = [1048, 468], tip = [1170, 400];
+  brush(c, cubic(base, [1080, 430], [1110, 470], tip, 20), q => 9 * (1 - q * .7), INK(.95), .2, 11);
+  brush(c, cubic([1100, 455], [1105, 420], [1090, 400], [1070, 380], 12), q => 5 * (1 - q * .6), INK(.92), .2, 12);
+  for (const [x, y, rx] of [[1170, 392, 46], [1140, 412, 36], [1070, 374, 34], [1205, 404, 28]]) { const sw = Math.sin(T * 1.6 + x) * 2; blob(c, x + sw, y, rx, rx * .32, 'rgba(34,44,34,.88)'); c.strokeStyle = 'rgba(20,28,20,.8)'; c.lineWidth = 1; for (let k = 0; k < 16; k++) { const xx = x - rx + k * rx / 8 + sw; c.beginPath(); c.moveTo(xx, y - rx * .25); c.lineTo(xx + 4, y + rx * .3); c.stroke(); } }
+}
+
+/* ---------------- petals ---------------- */
+function petals(c, n, a = 1, burst = 0) {
+  const r = rng(31);
+  for (let i = 0; i < n; i++) { const sp = 40 + r() * 70, ph = r(), y0 = r() * H, sz = 3 + r() * 4, rot = r() * 6;
+    let x = ((ph * (W + 200) + T * sp * (1 + burst)) % (W + 200)) - 100; let y = y0 + Math.sin(T * (.6 + r()) + i) * 30 + ((T * 14 + i * 30) % 120) - 60;
+    c.save(); c.translate(x, y); c.rotate(rot + T * (1 + r() * 2)); c.scale(1, .45 + .35 * Math.sin(T * 3 + i)); blob(c, 0, 0, sz, sz * .6, i % 5 === 0 ? RED(.75 * a) : `rgba(214,128,120,${.7 * a})`); c.restore(); }
+}
+
+/* ---------------- slash line ---------------- */
+const SL = x => 200 + 130 * x / W; // world line across the sky
+const T_SLASH = 26.25, T_CHIN = 31.25, T_SPLIT = 31.4;
+
+/* ---------------- background world ---------------- */
+function drawWorldBg(c) {
+  c.setTransform(1, 0, 0, 1, 0, 0); c.drawImage(paperC, 0, 0);
+  const danger = sstep(19.2, 20, T) * (1 - sstep(33, 37, T));
+  camT(c, .05); const sky = c.createLinearGradient(0, -100, 0, 500); sky.addColorStop(0, `rgba(120,100,80,${.18 + .2 * danger})`); sky.addColorStop(1, 'rgba(120,100,80,0)'); c.fillStyle = sky; c.fillRect(-400, -300, W + 800, 900);
+  camT(c, .08); blob(c, 380, 205, 82, 82, RED(.82)); blob(c, 380, 205, 100, 100, RED(.08));
+  // birds early
+  if (T < 17) { camT(c, .2); c.strokeStyle = INK(.7); c.lineWidth = 1.4; for (let k = 0; k < 5; k++) { const bx = 120 + T * 32 + k * 34 + Math.sin(k) * 10, by = 150 + k * 9 + Math.sin(T * 2 + k) * 4, f = Math.sin(T * 9 + k) * 4; c.beginPath(); c.moveTo(bx - 7, by - f); c.quadraticCurveTo(bx - 3, by - 2, bx, by); c.quadraticCurveTo(bx + 3, by - 2, bx + 7, by - f); c.stroke(); } }
+  camT(c, .22); ridge(c, { y: 400, amp: 40, sc: 160, seed: 3.1, a: .22, fade: 260, peaks: [[150, 150, 140], [520, 110, 120], [760, 190, 150]], cun: 10 });
+  const P = dragonPose(T);
+  if (T < 18.4) { camT(c, .35); drawDragon(c, P); }
+  camT(c, .3); mist(c, 380, 60, .75, 14, 5);
+  camT(c, .4); ridge(c, { y: 500, amp: 50, sc: 120, seed: 7.7, a: .4, fade: 200, peaks: [[60, 210, 130], [330, 250, 110], [600, 160, 120], [880, 120, 140]], cun: 26 });
+  camT(c, .5); mist(c, 470, 70, .85, 20, 9);
+  if (T >= 18.4 && T < 36.2) { camT(c, .7); drawDragon(c, P, 1 - sstep(32.6, 36.0, T)); }
+  camT(c, .62); ridge(c, { y: 640, amp: 40, sc: 90, seed: 13.3, a: .58, fade: 140, peaks: [[200, 150, 160], [520, 90, 130]], cun: 30 });
+  camT(c, .7); mist(c, 620, 80, .9, 30, 13);
+}
+
+/* ---------------- face close-up ---------------- */
+function drawFace(c, o) {
+  c.setTransform(1, 0, 0, 1, 0, 0); c.drawImage(paperC, 0, 0);
+  const z = o.z || 1, fx = o.fx ?? 640, fy = o.fy ?? 360; c.setTransform(z, 0, 0, z, W / 2 - fx * z + shake * sn(T * 23, 1) * 6, H / 2 - fy * z + shake * sn(T * 21, 2) * 6);
+  // backdrop: red sun & far ridge
+  blob(c, 1010, 170, 120, 120, RED(.5));
+  ridge(c, { y: 560, amp: 30, sc: 120, seed: 21, a: .16, fade: 200, peaks: [[200, 140, 160], [1100, 120, 140]] });
+  // shoulders & haori
+  poly(c, [[180, 760], [300, 650], [560, 600], [720, 600], [980, 650], [1100, 760]], INK(.92));
+  brush(c, [[585, 606], [640, 700]], () => 9, PAPER(.75), 0); brush(c, [[695, 606], [640, 700]], () => 9, PAPER(.75), 0);
+  brush(c, curve([540, 604], [640, 640], [745, 604], 16), () => 16, RED(.9), .1);
+  // neck
+  poly(c, [[585, 540], [695, 540], [690, 612], [590, 612]], 'rgba(228,210,182,1)'); brush(c, [[588, 545], [592, 612]], () => 3, INK(.8)); brush(c, [[692, 545], [688, 612]], () => 3, INK(.8));
+  // hair (revealed when the hat falls)
+  blob(c, 640, 255, 185, 120, INK(.95)); blob(c, 640, 132, 26, 20, INK(1)); brush(c, [[640, 150], [640, 92], [660, 70]], q => 12 * (1 - q * .6), INK(1));
+  // face
+  const face = [[470, 250], [472, 360], [492, 450], [545, 535], [600, 575], [640, 584], [680, 575], [735, 535], [788, 450], [808, 360], [810, 250]];
+  c.beginPath(); c.moveTo(470, 230); for (const p of face) c.lineTo(p[0], p[1]); c.lineTo(810, 230); c.closePath(); c.fillStyle = 'rgba(236,220,194,1)'; c.fill();
+  brush(c, catmull(face, 6), taper(.1, .1), INK(.88), .2, 4); // jaw line
+  // hair side locks
+  for (const s of [-1, 1]) { brush(c, curve([640 + s * 165, 240], [640 + s * 178, 300], [640 + s * 168, 372], 12), q => 10 * (1 - q), INK(.95), .2); }
+  // ears
+  for (const s of [-1, 1]) brush(c, curve([640 + s * 172, 330], [640 + s * 200, 360], [640 + s * 174, 400], 12), q => 5 * (1 - q * .5), INK(.7));
+  // brows
+  for (const s of [-1, 1]) brush(c, curve([640 + s * 28, 296], [640 + s * 70, 280], [640 + s * 128, 300], 14), taper(.1, .45), INK(.95), .25, 8 + s);
+  // eyes
+  const op = o.eyes;
+  for (const s of [-1, 1]) { const ex = 640 + s * 80, ey = 345;
+    if (op > .05) { c.save(); c.beginPath(); c.moveTo(ex - 46, ey); c.quadraticCurveTo(ex, ey - 26 * op, ex + 46, ey); c.quadraticCurveTo(ex, ey + 14 * op, ex - 46, ey); c.clip(); c.fillStyle = PAPER(1); c.fillRect(ex - 50, ey - 30, 100, 60); blob(c, ex - s * 4, ey - 2, 15, 15, INK(.95)); blob(c, ex - s * 4, ey - 2, 6, 6, INK(1)); blob(c, ex - s * 4 + 5, ey - 7, 3.2, 3.2, PAPER(1)); if (o.reflect) blob(c, ex - s * 4 - 4, ey + 4, 2, 2, RED(.9)); c.restore(); }
+    brush(c, curve([ex - 48, ey + 2], [ex, ey - 28 * op - 2], [ex + 48, ey + (1 - op) * 2], 16), taper(.15, .3), INK(1), .15, 20 + s);
+    brush(c, curve([ex - 40, ey + 3], [ex, ey + 12 * op + 4], [ex + 40, ey + 2], 12), q => 1.6, INK(.5), .2); }
+  // nose & mouth
+  brush(c, [[642, 352], [636, 400], [628, 440], [636, 452], [654, 450]], taper(.2, .2), INK(.8), .2, 30);
+  const sm = o.smile || 0; brush(c, cubic([596, 506 - sm * 6], [620, 510], [660, 510], [684, 506 - sm * 6], 16), taper(.3, .3), INK(.85), .2, 31);
+  brush(c, curve([614, 540], [640, 548], [666, 540], 8), q => 1.4, INK(.3));
+  // cheekbone wash
+  for (const s of [-1, 1]) blob(c, 640 + s * 120, 430, 50, 22, 'rgba(120,80,60,.06)');
+  // the cut on the cheek
+  if (o.cut > 0) { const p = clamp(o.cut); const a = [520, 418], b = [590, 400]; brush(c, [a, [lerp(a[0], b[0], p), lerp(a[1], b[1], p)]], () => 2.6, RED(.95), .2);
+    const dr = clamp(o.drop || 0); if (dr > 0) { brush(c, [[555, 410], [554, 410 + 60 * dr]], q => 3.2 * (1 - q * .4), RED(.9), .2); blob(c, 554, 412 + 60 * dr, 4.5, 6, RED(.95)); } }
+  // hat shadow on the face
+  const hs = 1 - o.hatOff; if (hs > 0) { c.save(); c.beginPath(); c.moveTo(470, 230); for (const p of face) c.lineTo(p[0], p[1]); c.lineTo(810, 230); c.closePath(); c.clip(); const gr = c.createLinearGradient(0, 285, 0, 400); gr.addColorStop(0, INK(.55 * hs)); gr.addColorStop(1, INK(0)); c.fillStyle = gr; c.fillRect(400, 230, 500, 200); c.restore(); }
+  // the kasa (straw hat), possibly split
+  drawKasa(c, o);
+}
+function hatShape(c) { c.beginPath(); c.moveTo(120, 292); c.quadraticCurveTo(400, 250, 640, -260); c.quadraticCurveTo(880, 250, 1160, 292); c.quadraticCurveTo(640, 268, 120, 292); }
+function hatPaint(c) {
+  hatShape(c); const gr = c.createLinearGradient(0, -200, 0, 300); gr.addColorStop(0, 'rgba(70,56,42,1)'); gr.addColorStop(1, 'rgba(110,88,62,1)'); c.fillStyle = gr; c.fill();
+  c.save(); hatShape(c); c.clip(); c.strokeStyle = 'rgba(30,22,16,.5)'; c.lineWidth = 2; for (let k = -24; k <= 24; k++) { c.beginPath(); c.moveTo(640, -260); c.lineTo(640 + k * 24, 300); c.stroke(); } c.strokeStyle = 'rgba(236,226,204,.12)'; c.lineWidth = 1; for (let y = -150; y < 300; y += 26) { c.beginPath(); c.moveTo(0, y + 10); c.lineTo(W, y); c.stroke(); } c.restore();
+  brush(c, curve([118, 292], [640, 262], [1162, 292], 30), taper(.05, .05), INK(.95), .2, 40);
+}
+const HL = x => 120 + .1 * (x - 640); // hat cut line (same slope family as the sky cut)
+function drawKasa(c, o) {
+  if (o.hatOff >= 1) return;
+  const sp = o.hatSplit || 0, fall = o.hatFall || 0;
+  if (sp <= 0) { hatPaint(c); return; }
+  // lower (brim) part
+  c.save(); c.translate(0, easeIn(fall) * 620); c.rotate(easeIn(fall) * .08); c.beginPath(); c.moveTo(0, HL(0)); c.lineTo(W, HL(W)); c.lineTo(W, H); c.lineTo(0, H); c.closePath(); c.clip(); hatPaint(c); c.restore();
+  // upper (crown) part slides along the cut and falls
+  const s = easeInOut(clamp(sp)); c.save(); c.translate(s * 420, s * 42 + Math.pow(Math.max(0, sp - .5), 2) * 900); c.rotate(s * .25); c.beginPath(); c.moveTo(0, HL(0)); c.lineTo(W, HL(W)); c.lineTo(W, -400); c.lineTo(0, -400); c.closePath(); c.clip(); hatPaint(c); c.restore();
+  if (sp < .25) { c.strokeStyle = `rgba(255,250,236,${1 - sp * 4})`; c.lineWidth = 3; c.beginPath(); c.moveTo(0, HL(0)); c.lineTo(W, HL(W)); c.stroke(); }
+}
+
+/* ---------------- hand on hilt close-up ---------------- */
+function drawHilt(c, push) {
+  c.setTransform(1, 0, 0, 1, 0, 0); c.drawImage(paperC, 0, 0);
+  c.setTransform(1, 0, 0, 1, shake * sn(T * 23, 1) * 6, shake * sn(T * 21, 2) * 6);
+  // haori folds
+  poly(c, [[0, 0], [W, 0], [W, H], [0, H]], INK(.72));
+  c.strokeStyle = PAPER(.08); c.lineWidth = 14; for (let k = 0; k < 9; k++) { c.beginPath(); c.moveTo(k * 170 - 100, 0); c.quadraticCurveTo(k * 170 + 40, 360, k * 170 - 60, 720); c.stroke(); }
+  const ax = [Math.cos(-.32), Math.sin(-.32)]; // axis pointing right-up... saya goes right-down
+  const dir = [Math.cos(.3), Math.sin(.3)]; const mouth = [560, 380]; const off = push * 26;
+  const tsuba = [mouth[0] - dir[0] * (6 + off), mouth[1] - dir[1] * (6 + off)];
+  // blade sliver
+  if (push > 0) { brush(c, [tsuba, mouth], () => 30, '#d9b45a', 0); const shine = (T * 2.4) % 1; c.save(); c.beginPath(); c.moveTo(tsuba[0], tsuba[1] - 14); c.lineTo(mouth[0], mouth[1] - 14); c.lineTo(mouth[0], mouth[1] + 4); c.lineTo(tsuba[0], tsuba[1] + 4); c.closePath(); c.fillStyle = '#f4efe2'; c.globalAlpha = clamp((off - 8) / 10); c.fill(); c.restore(); }
+  // saya
+  brush(c, [mouth, [mouth[0] + dir[0] * 900, mouth[1] + dir[1] * 900]], q => 62 - q * 8, '#120e0c', 0);
+  brush(c, [[mouth[0] + 10, mouth[1] - 20], [mouth[0] + dir[0] * 900, mouth[1] + dir[1] * 900 - 20]], () => 4, PAPER(.25), 0);
+  brush(c, [mouth, [mouth[0] + dir[0] * 16, mouth[1] + dir[1] * 16]], () => 66, '#e9dfcc', 0); // koiguchi horn
+  // tsuka with ito wrap
+  const kas = [tsuba[0] - dir[0] * 360, tsuba[1] - dir[1] * 360];
+  brush(c, [tsuba, kas], () => 52, '#1b1714', 0);
+  c.save(); c.translate(tsuba[0], tsuba[1]); c.rotate(.3); for (let k = 1; k < 13; k++) { const x = -k * 27; poly(c, [[x, 0], [x + 12, -14], [x + 24, 0], [x + 12, 14]], 'rgba(236,226,204,.85)'); } blob(c, -360, 0, 16, 30, '#3a3028'); c.restore();
+  // tsuba
+  c.save(); c.translate(tsuba[0], tsuba[1]); c.rotate(.3); blob(c, 0, 0, 16, 96, '#2a2420'); blob(c, 0, 0, 16, 96, 'rgba(0,0,0,0)'); c.strokeStyle = '#c9a24a'; c.lineWidth = 4; c.beginPath(); c.ellipse(0, 0, 16, 96, 0, 0, 7); c.stroke(); blob(c, 0, -52, 6, 18, PAPER(.35)); blob(c, 0, 52, 6, 18, PAPER(.35)); c.restore();
+  // left hand gripping the saya, thumb on the tsuba
+  const hx = mouth[0] + 110, hy = mouth[1] + 30;
+  const SK = 'rgba(232,214,186,1)';
+  blob(c, hx + 10, hy + 20, 112, 92, SK, .3);
+  for (let k = 0; k < 4; k++) { const fx = hx - 70 + k * 42, fy = hy + 70 + k * 10; blob(c, fx, fy, 26, 34, SK, .3); brush(c, curve([fx - 22, fy - 18], [fx - 26, fy + 20], [fx + 6, fy + 34], 10), q => 2.6, INK(.7), .2, k); }
+  brush(c, curve([hx - 80, hy - 50], [hx - 125 - off * .8, hy - 70], [tsuba[0] + 22, tsuba[1] - 42], 14), q => 46 * (1 - q * .35), SK, .03);
+  brush(c, curve([hx - 84, hy - 76], [hx - 128 - off * .8, hy - 94], [tsuba[0] + 22, tsuba[1] - 62], 14), q => 3 * (1 - q * .4), INK(.75), .2);
+  blob(c, tsuba[0] + 26, tsuba[1] - 44, 10, 7, 'rgba(210,180,150,1)', .3);
+  brush(c, curve([hx - 96, hy - 50], [hx + 40, hy - 95], [hx + 118, hy - 10], 16), () => 3, INK(.65), .2);
+  // sleeve edge
+  poly(c, [[hx + 90, hy - 160], [W + 50, hy - 240], [W + 50, H + 50], [hx + 150, H + 50], [hx + 110, hy + 60]], INK(.9));
+}
+
+/* ---------------- slash brush ---------------- */
+function drawSlashStroke(c, p) {
+  c.setTransform(1, 0, 0, 1, 0, 0); c.fillStyle = '#f7f1e3'; c.fillRect(0, 0, W, H);
+  const a = [W + 80, 170], b = [-80, 560]; const pts = []; for (let i = 0; i <= 80; i++) { const u = i / 80 * p; pts.push([lerp(a[0], b[0], u), lerp(a[1], b[1], u) + Math.sin(u * 7) * 6]); }
+  brush(c, pts, s => 165 * Math.pow(Math.sin(Math.PI * clamp(s * .9 + .05)), .6) * (1 + .25 * sn(s * 20, 3)), INK(.97), .25, 50);
+  // dry-brush streaks
+  const r = rng(51); c.strokeStyle = '#f7f1e3'; for (let k = 0; k < 18; k++) { const off = (r() - .5) * 140, w = .8 + r() * 2.6, st = r() * .3, en = .7 + r() * .3; c.lineWidth = w; c.beginPath(); for (let i = Math.floor(st * pts.length); i < Math.floor(en * pts.length); i++) { const q = pts[i]; i === Math.floor(st * pts.length) ? c.moveTo(q[0], q[1] + off) : c.lineTo(q[0], q[1] + off); } c.stroke(); }
+  // spatter
+  for (let k = 0; k < 40; k++) { const u = r() * p, q = [lerp(a[0], b[0], u), lerp(a[1], b[1], u)]; blob(c, q[0] + (r() - .5) * 220, q[1] + (r() - .5) * 220, 1 + r() * 5, 1 + r() * 5, INK(.9)); }
+  if (p > .6) for (let k = 0; k < 7; k++) blob(c, 300 + r() * 600, 300 + r() * 200, 2 + r() * 6, 2 + r() * 6, RED(.85));
+}
+
+/* ---------------- text ---------------- */
+function caption(c, text, a, y = 662, size = 26) { if (a <= 0) return; c.setTransform(1, 0, 0, 1, 0, 0); c.save(); c.globalAlpha = a; c.font = `500 ${size}px "Shippori Mincho", Georgia, serif`; c.textAlign = 'center'; c.lineWidth = 6; c.strokeStyle = PAPER(.85); c.strokeText(text, W / 2, y); c.fillStyle = INK(.95); c.fillText(text, W / 2, y); c.restore(); }
+function hanko(c, x, y, s, a, txt = '完') { c.save(); c.globalAlpha = a; c.translate(x, y); c.rotate(-.04); c.fillStyle = RED(.9); c.fillRect(-s / 2, -s / 2, s, s); c.strokeStyle = PAPER(.9); c.lineWidth = s * .05; c.strokeRect(-s * .4, -s * .4, s * .8, s * .8); c.font = `${s * .62}px "Yuji Syuku", serif`; c.fillStyle = PAPER(.95); c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText(txt, 0, s * .03); c.restore(); }
+
+/* ---------------- ink particles ---------------- */
+let lastDragonPts = null;
+function inkDust(c, pts, t0, t) { const e = t - t0; if (e < 0 || !pts) return; const r = rng(88); for (let i = 0; i < 700; i++) { const p = pts[Math.floor(r() * pts.length)]; const vx = 20 + r() * 120, vy = -30 - r() * 90; const life = 2 + r() * 4; const a = clamp(1 - e / life) * clamp(e * 3); if (a <= 0) continue; const x = p[0] + (r() - .5) * 60 + vx * e + Math.sin(e * 2 + i) * 10, y = p[1] + (r() - .5) * 60 + vy * e * (1 - e * .05); blob(c, x, y, 1 + r() * 4 * (1 + e * .4), 1 + r() * 3, INK(.55 * a)); } }
+
+/* ---------------- SCORE OF SHOTS ---------------- */
+function frame(t) {
+  T = t; shake = 0; g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = 'source-over';
+  shake += .6 * pulse(t, 19.25, 21, .05, 1.2) + .25 * pulse(t, 26.25, 26.8, .02, .4) + .9 * pulse(t, T_SPLIT, 33.4, .05, 1.6) + .15 * pulse(t, 23, 26, .5, .1);
+  if (t < 5) {
+    // title: ink blooms on paper
+    g.drawImage(paperC, 0, 0); const b = easeOut(seg(t, .4, 3.2)); const r = rng(3);
+    for (let k = 0; k < 26; k++) { const a = r() * 6.28, d = r() * 90 * b; blob(g, 640 + Math.cos(a) * d, 330 + Math.sin(a) * d * .8, (60 + r() * 70) * b, (50 + r() * 60) * b, INK(.08)); }
+    blob(g, 640, 330, 150 * b, 150 * b, RED(.12 * b));
+    g.globalAlpha = sstep(1.2, 2.4, t) * (1 - sstep(4.2, 5, t)); g.font = '170px "Yuji Syuku", serif'; g.fillStyle = INK(.95); g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('龍斬', 640, 315);
+    g.font = '800 34px "Shippori Mincho", Georgia, serif'; g.fillText('IL TAGLIO DEL DRAGO', 640, 470); g.font = '500 18px "Shippori Mincho", Georgia, serif'; g.fillStyle = INK(.7); g.fillText('un racconto a inchiostro', 640, 510); g.globalAlpha = 1;
+    hanko(g, 812, 420, 54, sstep(2.4, 2.6, t) * (1 - sstep(4.2, 5, t)), '侍');
+    const f = sstep(4.3, 5, t); if (f > 0) { g.fillStyle = PAPER(f); g.fillRect(0, 0, W, H); }
+    return;
+  }
+  // close-up shots
+  if (t >= 21 && t < 24) { const op = sstep(22.2, 23.0, t); drawFace(g, { z: lerp(2.5, 2.8, seg(t, 21, 24)), fx: 640, fy: 330, eyes: op, hatOff: 0, reflect: true }); petals(g, 12, .8); caption(g, '', 0); vignette(); return; }
+  if (t >= 24 && t < 26) { drawHilt(g, easeOut(seg(t, 24.8, 25.0))); vignette(); return; }
+  if (t >= 26.25 && t < 26.55) { drawSlashStroke(g, easeOut(seg(t, 26.25, 26.45))); return; }
+  if (t >= 37 && t < 43) {
+    const sp = seg(t, 39.55, 40.6), fall = seg(t, 40.25, 40.9);
+    drawFace(g, { z: lerp(1.0, 1.12, seg(t, 37, 43)), fx: 640, fy: lerp(340, 360, seg(t, 37, 43)), eyes: sstep(41.7, 42.4, t) * .8, hatOff: fall >= 1 ? 1 : 0, hatSplit: t > 39.2 ? Math.max(.001, sp) : 0, hatFall: fall, cut: seg(t, 40.9, 41.15), drop: seg(t, 41.3, 42.8), smile: sstep(42.3, 42.9, t) * .6 });
+    if (t > 39.2 && t < 39.6) { g.setTransform(1, 0, 0, 1, 0, 0); const z = lerp(1.0, 1.12, seg(t, 37, 43)); g.strokeStyle = `rgba(255,250,236,${1 - seg(t, 39.2, 39.6)})`; g.lineWidth = 3; g.beginPath(); g.moveTo(0, H / 2 + (HL(0) - lerp(340, 360, seg(t, 37, 43))) * z - 300 * 0); g.stroke(); }
+    petals(g, 14, .8); vignette(); return;
+  }
+  // world shots
+  let pose = { mode: 'stand', gust: 0 }, sx = 1;
+  if (t < 12) { const u = easeInOut(seg(t, 5, 12)); cam = { x: lerp(690, 760, u), y: lerp(380, 368, u), z: lerp(1.0, 1.1, u) }; }
+  else if (t < 17.2) { const u = seg(t, 12, 17.2); cam = { x: lerp(920, 900, u), y: lerp(355, 350, u), z: lerp(2.6, 2.85, u) }; }
+  else if (t < 19.2) { cam = { x: 640, y: 360, z: 1.04 }; }
+  else if (t < 21) { const u = easeOut(seg(t, 19.2, 21)); cam = { x: lerp(640, 700, u), y: lerp(380, 340, u), z: lerp(1.0, 1.18, u) }; pose.gust = 1; }
+  else if (t < 26.25) { cam = { x: 960, y: 372, z: 3.2 }; pose = { mode: 'iai', gust: .5 }; }
+  else if (t < 27.6) { const u = seg(t, 26.55, 27.6); cam = { x: lerp(880, 900, u), y: 370, z: lerp(2.3, 2.4, u) }; pose = { mode: 'slash', gust: 1 }; }
+  else if (t < T_SPLIT) { const u = seg(t, 27.6, T_SPLIT); cam = { x: lerp(880, 940, u), y: lerp(372, 380, u), z: lerp(2.2, 2.7, u) }; pose = { mode: 'sheath', p: easeInOut(seg(t, 28.2, T_CHIN)) }; if (t >= T_CHIN) pose = { mode: 'stand' }; }
+  else if (t < 37) { cam = { x: 640, y: 360, z: 1.0 }; pose = { mode: 'stand', gust: pulse(t, 31.4, 33, .05, 1) }; }
+  else { const u = easeInOut(seg(t, 43, 48)); cam = { x: lerp(700, 640, u), y: lerp(380, 360, u), z: lerp(1.12, 1.0, u) }; }
+  drawWorldBg(bg);
+  const P = dragonPose(t); if (t >= 18.4) lastDragonPts = spine(P);
+  // composite background, split along the cut after the sheath "chin"
+  g.setTransform(1, 0, 0, 1, 0, 0); g.drawImage(paperC, 0, 0);
+  if (t >= T_SPLIT) {
+    const e = easeOut(seg(t, T_SPLIT, 34.2)); const dx = 150 * e, dy = -34 * e - 10 * easeIn(seg(t, 33, 37));
+    g.save(); g.beginPath(); g.moveTo(-10, SL(-10) + 1.5); g.lineTo(W + 10, SL(W + 10) + 1.5); g.lineTo(W + 10, H + 10); g.lineTo(-10, H + 10); g.closePath(); g.clip(); g.drawImage(bgC, 0, 0); g.restore();
+    g.save(); g.beginPath(); g.moveTo(-10, SL(-10) - 1.5); g.lineTo(W + 10, SL(W + 10) - 1.5); g.lineTo(W + 10, -10); g.lineTo(-10, -10); g.closePath(); g.clip(); g.translate(dx, dy); g.rotate(-.025 * e); g.drawImage(bgC, 0, 0); g.restore();
+    const fl = 1 - seg(t, T_SPLIT, 32.2); g.strokeStyle = `rgba(255,252,240,${.6 + .4 * fl})`; g.lineWidth = 2 + 6 * fl; g.beginPath(); g.moveTo(0, SL(0)); g.lineTo(W, SL(W)); g.stroke();
+    // dragon dissolving into ink
+    g.save(); inkDust(g, lastDragonPts, T_SPLIT, t); g.restore();
+  } else g.drawImage(bgC, 0, 0);
+  // the instant after the slash: a hairline across the sky
+  if (t >= 26.55 && t < 27.6) { const a = 1 - seg(t, 26.55, 27.6); camT(g, .7); g.strokeStyle = `rgba(255,252,240,${a})`; g.lineWidth = 2.5 / cam.z; g.beginPath(); g.moveTo(-200, SL(-200)); g.lineTo(W + 200, SL(W + 200)); g.stroke(); }
+  // foreground crag + samurai
+  camT(g, 1); drawCrag(g); drawSamurai(g, PEAK[0], PEAK[1], .95 * sx, { ...pose, gust: pose.gust || 0 });
+  if (t >= T_CHIN && t < T_CHIN + .25) { const a = 1 - seg(t, T_CHIN, T_CHIN + .25); g.setTransform(1, 0, 0, 1, 0, 0); g.fillStyle = `rgba(255,252,240,${a * .5})`; g.fillRect(0, 0, W, H); }
+  g.setTransform(1, 0, 0, 1, 0, 0); petals(g, t > T_SPLIT && t < 37 ? 70 : 40, 1, t > T_SPLIT && t < 37 ? 1.5 : 0);
+  // captions
+  caption(g, 'Sulla vetta più alta, il vento non ha padrone.', pulse(t, 6.4, 11.4, .6, .6));
+  caption(g, 'Laggiù, tra le nuvole, il drago si è svegliato.', pulse(t, 12.6, 16.9, .6, .6));
+  caption(g, 'Niente. Il drago non cade.', pulse(t, 28.0, 30.6, .5, .6));
+  caption(g, 'Un solo taglio. Anche il cielo.', pulse(t, 33.6, 36.6, .5, .6));
+  if (t >= 43) { g.setTransform(1, 0, 0, 1, 0, 0); hanko(g, 1150, 120, 90, sstep(44.4, 44.5, t)); const a = sstep(44.8, 45.8, t); g.save(); g.globalAlpha = a; g.font = '170px "Yuji Syuku", serif'; g.fillStyle = INK(.9); g.textAlign = 'left'; g.textBaseline = 'top'; g.fillText('龍', 70, 60); g.fillText('斬', 70, 240); g.font = '800 26px "Shippori Mincho", Georgia, serif'; g.fillText('IL TAGLIO DEL DRAGO', 72, 440); g.restore(); }
+  // flash on the dragon's eruption
+  if (t >= 19.2 && t < 19.5) { g.setTransform(1, 0, 0, 1, 0, 0); g.fillStyle = INK(.5 * (1 - seg(t, 19.2, 19.5))); g.fillRect(0, 0, W, H); }
+  vignette();
+  const fo = sstep(46.8, 48, t); if (fo > 0) { g.setTransform(1, 0, 0, 1, 0, 0); g.fillStyle = PAPER(fo); g.fillRect(0, 0, W, H); }
+  if (t < 5.6) { g.setTransform(1, 0, 0, 1, 0, 0); g.fillStyle = PAPER(1 - seg(t, 5, 5.6)); g.fillRect(0, 0, W, H); }
+}
+function vignette() { g.setTransform(1, 0, 0, 1, 0, 0); g.globalCompositeOperation = 'multiply'; g.globalAlpha = .55; g.drawImage(paperC, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = 'source-over'; }
+
+/* =====================================================================
+   AUDIO (Web Audio, fully synthesized)
+   ===================================================================== */
+const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+const EV = []; const ev = (t, fn) => EV.push({ t, fn });
+function engine(ctx) {
+  const sr = ctx.sampleRate, nb = ctx.createBuffer(2, sr * 4, sr), nr = rng(42);
+  for (let ch = 0; ch < 2; ch++) { const d = nb.getChannelData(ch); for (let i = 0; i < d.length; i++) d[i] = nr() * 2 - 1; }
+  const master = ctx.createGain(); master.gain.value = .9; const comp = ctx.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 3.5; comp.attack.value = .004; comp.release.value = .3; master.connect(comp); comp.connect(ctx.destination);
+  const ir = ctx.createBuffer(2, sr * 4.5, sr); for (let ch = 0; ch < 2; ch++) { const d = ir.getChannelData(ch); for (let i = 0; i < d.length; i++) d[i] = (nr() * 2 - 1) * Math.pow(1 - i / d.length, 2.6); }
+  const verb = ctx.createConvolver(); verb.buffer = ir; const vg = ctx.createGain(); vg.gain.value = .42; verb.connect(vg); vg.connect(master);
+  const bus = (gn, send) => { const n = ctx.createGain(); n.gain.value = gn; n.connect(master); const s = ctx.createGain(); s.gain.value = send; n.connect(s); s.connect(verb); return n; };
+  const dist = ctx.createWaveShaper(); const cu = new Float32Array(1024); for (let i = 0; i < 1024; i++) { const x = i / 512 - 1; cu[i] = Math.tanh(x * 4); } dist.curve = cu;
+  return { ctx, noise: nb, master, music: bus(.75, .5), sfx: bus(.9, .35), amb: bus(.7, .15), dist };
+}
+const G = (E, v = 0) => { const n = E.ctx.createGain(); n.gain.value = v; return n; };
+const O = (E, type, f, w, dur) => { const o = E.ctx.createOscillator(); o.type = type; o.frequency.setValueAtTime(f, w); o.start(w); o.stop(w + dur + .05); return o; };
+const N = (E, w, dur) => { const s = E.ctx.createBufferSource(); s.buffer = E.noise; s.loop = true; s.start(w, (w * 7.31) % 3.5); s.stop(w + dur + .05); return s; };
+const F = (E, type, f, Q = .7) => { const b = E.ctx.createBiquadFilter(); b.type = type; b.frequency.value = f; b.Q.value = Q; return b; };
+const P = (E, p) => { const n = E.ctx.createStereoPanner(); n.pan.value = p; return n; };
+function adsr(gn, w, a, peak, dur, rel) { gn.gain.setValueAtTime(0, w); gn.gain.linearRampToValueAtTime(peak, w + a); gn.gain.setValueAtTime(peak, w + Math.max(a, dur)); gn.gain.linearRampToValueAtTime(0, w + Math.max(a, dur) + rel); }
+function perc(gn, w, peak, dec) { gn.gain.setValueAtTime(0, w); gn.gain.linearRampToValueAtTime(peak, w + .004); gn.gain.exponentialRampToValueAtTime(.0001, w + dec); }
+
+function shaku(E, w, m, dur, vol = .1, bend = -1.2) { const f = mtof(m), out = E.music; const o = O(E, 'sine', f, w, dur + .6); o.frequency.setValueAtTime(f * Math.pow(2, bend / 12), w); o.frequency.exponentialRampToValueAtTime(f, w + .3);
+  const vib = O(E, 'sine', 5.2, w, dur + .6), vg = G(E); vib.connect(vg); vg.connect(o.frequency); vg.gain.setValueAtTime(0, w); vg.gain.linearRampToValueAtTime(0, w + dur * .35); vg.gain.linearRampToValueAtTime(f * .016, w + dur);
+  const o2 = O(E, 'triangle', f * 2, w, dur + .6), g2 = G(E, .12); o2.frequency.setValueAtTime(f * 2 * Math.pow(2, bend / 12), w); o2.frequency.exponentialRampToValueAtTime(f * 2, w + .3); o2.connect(g2);
+  const gn = G(E); o.connect(gn); g2.connect(gn); gn.connect(out); adsr(gn, w, .22, vol, dur, .45);
+  const n = N(E, w, dur + .6), bf = F(E, 'bandpass', f * 1.02, 2.5), bg2 = G(E); n.connect(bf); bf.connect(bg2); bg2.connect(out); adsr(bg2, w, .12, vol * .9, dur, .4);
+  const h = N(E, w, .4), hf = F(E, 'highpass', 2500), hg = G(E); h.connect(hf); hf.connect(hg); hg.connect(out); perc(hg, w, vol * .5, .3); }
+function koto(E, w, m, vol = .14, pan = 0) { const f = mtof(m), pn = P(E, pan); pn.connect(E.music); const lp = F(E, 'lowpass', 5000, 1), gn = G(E); lp.frequency.setValueAtTime(6000, w); lp.frequency.exponentialRampToValueAtTime(900, w + .8); lp.connect(gn); gn.connect(pn); perc(gn, w, vol, 2.2);
+  for (const [type, r, a] of [['sawtooth', 1, .5], ['triangle', 1, 1], ['sine', 2, .4], ['sine', 3.01, .2]]) { const o = O(E, type, f * r, w, 2.3), og = G(E, a); o.frequency.setValueAtTime(f * r * 1.006, w); o.frequency.exponentialRampToValueAtTime(f * r, w + .08); o.connect(og); og.connect(lp); } }
+function kotoBend(E, w, m, vol = .14) { const f = mtof(m), lp = F(E, 'lowpass', 3000), gn = G(E); lp.connect(gn); gn.connect(E.music); perc(gn, w, vol, 3); const o = O(E, 'triangle', f, w, 3), s = O(E, 'sawtooth', f, w, 3), sg = G(E, .3); o.frequency.setValueAtTime(f, w); o.frequency.linearRampToValueAtTime(f * 1.12, w + .5); o.frequency.linearRampToValueAtTime(f, w + 1.4); s.frequency.setValueAtTime(f, w); s.frequency.linearRampToValueAtTime(f * 1.12, w + .5); s.frequency.linearRampToValueAtTime(f, w + 1.4); o.connect(lp); s.connect(sg); sg.connect(lp); }
+function taiko(E, w, vol = .6, f0 = 95) { const o = O(E, 'sine', f0, w, 1.4), gn = G(E); o.frequency.exponentialRampToValueAtTime(f0 * .5, w + .35); o.connect(gn); gn.connect(E.music); perc(gn, w, vol, 1.2); const n = N(E, w, .3), lf = F(E, 'lowpass', 380), ng = G(E); n.connect(lf); lf.connect(ng); ng.connect(E.music); perc(ng, w, vol * .7, .22); }
+function kaClick(E, w, vol = .2) { const n = N(E, w, .05), hf = F(E, 'bandpass', 2400, 2), gn = G(E); n.connect(hf); hf.connect(gn); gn.connect(E.music); perc(gn, w, vol, .05); }
+function drone(E, w, ms, dur, vol = .05, cut = 380) { const lp = F(E, 'lowpass', cut, .4), gn = G(E); lp.connect(gn); gn.connect(E.music); adsr(gn, w, 1.5, vol, dur, 1.5); ms.forEach((m, i) => [-6, 6].forEach(dt => { const o = O(E, 'sawtooth', mtof(m), w, dur + 1.6); o.detune.value = dt + i * 2; o.connect(lp); })); }
+function wind(E, w, vol, f = 600) { const n = N(E, w, 3), bf = F(E, 'bandpass', f, .8), gn = G(E), pn = P(E, Math.sin(w * 1.3) * .6); bf.frequency.setValueAtTime(f, w); bf.frequency.linearRampToValueAtTime(f * (1.25 + Math.sin(w) * .25), w + 3); n.connect(bf); bf.connect(gn); gn.connect(pn); pn.connect(E.amb); gn.gain.setValueAtTime(0, w); gn.gain.linearRampToValueAtTime(vol, w + 1); gn.gain.setValueAtTime(vol, w + 2); gn.gain.linearRampToValueAtTime(0, w + 3); }
+function roar(E, w, dur = 2.6, vol = .4, f0 = 110, f1 = 55) { const o1 = O(E, 'sawtooth', f0, w, dur), o2 = O(E, 'sawtooth', f0 * 1.03, w, dur), lfo = O(E, 'sine', 13, w, dur), lg = G(E, .5); [o1, o2].forEach(o => { o.frequency.setValueAtTime(f0 * .8, w); o.frequency.linearRampToValueAtTime(f0, w + .3); o.frequency.exponentialRampToValueAtTime(f1, w + dur); });
+  const pre = G(E, .6), lp = F(E, 'lowpass', 1400, 2), gn = G(E); o1.connect(pre); o2.connect(pre); const sh = E.ctx.createWaveShaper(); sh.curve = E.dist.curve; pre.connect(sh); sh.connect(lp); lp.connect(gn); gn.connect(E.sfx); lfo.connect(lg); lg.connect(gn.gain); adsr(gn, w, .15, vol, dur - .6, .6);
+  const n = N(E, w, dur), bf = F(E, 'bandpass', 500, .8), ng = G(E); bf.frequency.exponentialRampToValueAtTime(200, w + dur); n.connect(bf); bf.connect(ng); ng.connect(E.sfx); adsr(ng, w, .1, vol * .8, dur - .6, .6); }
+function thunder(E, w, vol = .5) { const n = N(E, w, 3.5), lp = F(E, 'lowpass', 900), gn = G(E); lp.frequency.exponentialRampToValueAtTime(90, w + 3); n.connect(lp); lp.connect(gn); gn.connect(E.sfx); perc(gn, w, vol, 3.3); }
+function shing(E, w, vol = .2, dec = 2.4) { [2210, 3530, 5260, 7390, 9810, 2232].forEach((f, i) => { const o = O(E, 'sine', f, w, dec), gn = G(E), pn = P(E, (i % 2 ? .3 : -.3)); o.connect(gn); gn.connect(pn); pn.connect(E.sfx); perc(gn, w, vol / (1 + i * .5), dec - i * .2); }); const n = N(E, w, .35), hf = F(E, 'highpass', 3000), gn = G(E); hf.frequency.linearRampToValueAtTime(8000, w + .3); n.connect(hf); hf.connect(gn); gn.connect(E.sfx); adsr(gn, w, .02, vol * .8, .15, .15); }
+function whoosh(E, w, dur = .25, vol = .5, f0 = 6000, f1 = 300) { const n = N(E, w, dur + .1), bf = F(E, 'bandpass', f0, 1.2), gn = G(E); bf.frequency.setValueAtTime(f0, w); bf.frequency.exponentialRampToValueAtTime(f1, w + dur); n.connect(bf); bf.connect(gn); gn.connect(E.sfx); gn.gain.setValueAtTime(0, w); gn.gain.linearRampToValueAtTime(vol, w + dur * .3); gn.gain.linearRampToValueAtTime(0, w + dur); }
+function chin(E, w, vol = .3) { [3820, 6230, 8870, 5010].forEach((f, i) => { const o = O(E, 'sine', f, w, 1.4), gn = G(E); o.connect(gn); gn.connect(E.sfx); perc(gn, w, vol / (1 + i * .7), 1.3 - i * .25); }); const n = N(E, w, .03), gn = G(E); n.connect(gn); gn.connect(E.sfx); perc(gn, w, vol * .8, .02); }
+function gong(E, w, vol = .35, dur = 7) { [[72, 1], [118, .6], [176, .45], [231, .35], [297, .3], [404, .2], [73.4, .6]].forEach(([f, a]) => { const o = O(E, 'sine', f, w, dur), gn = G(E); o.frequency.setValueAtTime(f * 1.01, w); o.frequency.exponentialRampToValueAtTime(f, w + 1); o.connect(gn); gn.connect(E.music); gn.gain.setValueAtTime(0, w); gn.gain.linearRampToValueAtTime(vol * a, w + .04); gn.gain.exponentialRampToValueAtTime(.0001, w + dur); }); const n = N(E, w, .4), lp = F(E, 'lowpass', 600), gn = G(E); n.connect(lp); lp.connect(gn); gn.connect(E.music); perc(gn, w, vol * .6, .35); }
+function scrape(E, w, dur, vol = .05) { const n = N(E, w, dur), bf = F(E, 'bandpass', 5000, 6), gn = G(E); bf.frequency.setValueAtTime(5200, w); bf.frequency.linearRampToValueAtTime(3600, w + dur); n.connect(bf); bf.connect(gn); gn.connect(E.sfx); adsr(gn, w, dur * .3, vol, dur * .6, dur * .1); }
+function breath(E, w, dur = .6, vol = .06) { const n = N(E, w, dur), bf = F(E, 'bandpass', 900, .8), gn = G(E); n.connect(bf); bf.connect(gn); gn.connect(E.sfx); adsr(gn, w, dur * .6, vol, dur * .2, dur * .2); }
+function straw(E, w, vol = .2) { const n = N(E, w, .3), bf = F(E, 'bandpass', 1500, 1), gn = G(E); n.connect(bf); bf.connect(gn); gn.connect(E.sfx); perc(gn, w, vol, .25); const o = O(E, 'sine', 140, w, .2), og = G(E); o.connect(og); og.connect(E.sfx); perc(og, w, vol * .7, .15); }
+
+// --- score (miyako-bushi scale on D: D Eb G A Bb)
+for (let t = 0; t < DUR; t += 2) { const tt = t; ev(tt, (E, w) => wind(E, w, tt < 5 ? .02 : (tt > 17 && tt < 21) ? .09 : (tt > 26.4 && tt < 31.3) ? .035 : .05, (tt > 17 && tt < 21) ? 750 : 560)); }
+ev(.5, (E, w) => koto(E, w, 62, .12)); ev(1.6, (E, w) => koto(E, w, 69, .1, .3)); ev(2.3, (E, w) => shaku(E, w, 62, 2.6, .08)); ev(2.4, (E, w) => taiko(E, w, .25, 70)); ev(3.6, (E, w) => koto(E, w, 70, .08, -.3));
+[[5.6, 69, 2.2], [8.0, 70, .8], [8.9, 69, 1.4], [10.6, 67, 2.6], [13.6, 74, 1.6], [15.3, 70, .7], [16.1, 69, 1.4]].forEach(([t, m, d]) => ev(t, (E, w) => shaku(E, w, m, d, .1)));
+{ const pat = [50, 57, 62, 63, 67, 62, 57, 63]; let k = 0; for (let t = 5.2; t < 17; t += .62) { const m = pat[k++ % pat.length], tt = t; ev(tt, (E, w) => koto(E, w, m + (k % 16 > 11 ? 12 : 0), .07, Math.sin(tt) * .5)); } }
+ev(12, (E, w) => drone(E, w, [38, 45], 5.5, .04));
+ev(18.0, (E, w) => taiko(E, w, .25, 70)); ev(18.6, (E, w) => kotoBend(E, w, 50, .12));
+ev(19.2, (E, w) => { roar(E, w, 2.8, .45); thunder(E, w, .55); taiko(E, w, .9, 80); gong(E, w, .25, 4); [50, 51, 57, 58].forEach((m, i) => koto(E, w + i * .02, m, .1, i % 2 ? .4 : -.4)); });
+ev(19.9, (E, w) => taiko(E, w, .6, 90));
+ev(21, (E, w) => drone(E, w, [38, 45, 51], 5.2, .05, 500));
+{ let t = 21.4, d = .95; while (t < 26.0) { const tt = t; ev(tt, (E, w) => taiko(E, w, .25 + (tt - 21) * .06, 75)); t += d; d = Math.max(.16, d * .84); } }
+ev(22.3, (E, w) => shaku(E, w, 75, 3.6, .07, -2)); ev(24.85, (E, w) => { kaClick(E, w, .3); shing(E, w + .02, .07, 1.6); });
+ev(25.7, (E, w) => breath(E, w, .5, .07));
+ev(T_SLASH, (E, w) => { whoosh(E, w, .22, .6); shing(E, w + .05, .22, 3.2); taiko(E, w, .9, 60); });
+ev(28.0, (E, w) => koto(E, w, 69, .1)); ev(29.6, (E, w) => scrape(E, w, 1.6, .04));
+ev(T_CHIN, (E, w) => chin(E, w, .32));
+ev(T_SPLIT, (E, w) => { gong(E, w, .45, 8); taiko(E, w, 1, 55); roar(E, w + .2, 3.2, .3, 80, 30); whoosh(E, w, 1.8, .2, 3000, 200); thunder(E, w + .1, .35); });
+ev(31.9, (E, w) => taiko(E, w, .7, 70)); ev(32.35, (E, w) => taiko(E, w, .8, 62));
+{ const asc = [50, 55, 57, 62, 63, 67, 69, 74, 75, 79]; asc.forEach((m, i) => ev(32.6 + i * .12, (E, w) => koto(E, w, m, .09, i / 5 - 1))); }
+[[33.6, 74, 1.4], [35.1, 75, .6], [35.8, 74, 2.2]].forEach(([t, m, d]) => ev(t, (E, w) => shaku(E, w, m, d, .11)));
+for (const t of [34, 35, 36]) ev(t, (E, w) => taiko(E, w, .35, 80));
+ev(37.2, (E, w) => drone(E, w, [38, 50], 6, .03, 300));
+ev(39.2, (E, w) => { whoosh(E, w, .12, .25, 8000, 2000); chin(E, w + .02, .08); }); ev(39.6, (E, w) => whoosh(E, w, .7, .12, 1500, 300)); ev(40.6, (E, w) => straw(E, w, .25)); ev(40.95, (E, w) => koto(E, w, 86, .06)); ev(41.6, (E, w) => shaku(E, w, 62, 3.2, .09));
+{ const fin = [62, 67, 69, 74]; fin.forEach((m, i) => ev(43.2 + i * .35, (E, w) => koto(E, w, m, .1, i / 2 - .7))); }
+ev(44.45, (E, w) => { taiko(E, w, .7, 65); gong(E, w, .3, 5); });
+[[45.2, 69, 1.2], [46.5, 67, .5], [47.0, 62, 1.0]].forEach(([t, m, d]) => ev(t, (E, w) => shaku(E, w, m, d, .08)));
+ev(46.4, (E, w) => { E.master.gain.setValueAtTime(E.master.gain.value, w); E.master.gain.linearRampToValueAtTime(0, w + 1.6); });
+EV.sort((a, b) => a.t - b.t);
+
+let actx = null, AE = null, base = 0, offset = 0, idx = 0, timer = null, playing = false, started = false, pausedT = 0;
+function startAudio(off) { stopAudio(); offset = off; actx = new (window.AudioContext || window.webkitAudioContext)(); AE = engine(actx); base = actx.currentTime + .15; idx = EV.findIndex(e => e.t >= off - .02); if (idx < 0) idx = EV.length;
+  const pump = () => { if (!actx) return; const now = offset + (actx.currentTime - base); while (idx < EV.length && EV[idx].t < now + 1) { const e = EV[idx++]; try { e.fn(AE, Math.max(actx.currentTime + .01, base + e.t - offset)); } catch (err) { console.warn(err); } } }; pump(); timer = setInterval(pump, 80); playing = true; }
+function stopAudio() { if (timer) clearInterval(timer); timer = null; if (actx) { actx.close(); actx = null; } }
+const curT = () => actx && playing ? offset + Math.max(0, actx.currentTime - base) : pausedT;
+async function renderAudio() { const sr = 48000, oc = new OfflineAudioContext(2, sr * DUR, sr), E = engine(oc); for (const e of EV) e.fn(E, Math.max(0, e.t)); const buf = await oc.startRendering();
+  const n = buf.length, ab = new ArrayBuffer(44 + n * 4), dv = new DataView(ab), Wr = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  Wr(0, 'RIFF'); dv.setUint32(4, 36 + n * 4, true); Wr(8, 'WAVE'); Wr(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 2, true); dv.setUint32(24, sr, true); dv.setUint32(28, sr * 4, true); dv.setUint16(32, 4, true); dv.setUint16(34, 16, true); Wr(36, 'data'); dv.setUint32(40, n * 4, true);
+  const L = buf.getChannelData(0), R = buf.getChannelData(1); let o = 44; for (let i = 0; i < n; i++) { dv.setInt16(o, clamp(L[i], -1, 1) * 32767, true); dv.setInt16(o + 2, clamp(R[i], -1, 1) * 32767, true); o += 4; }
+  const by = new Uint8Array(ab); let s = ''; for (let i = 0; i < by.length; i += 0x8000) s += String.fromCharCode.apply(null, by.subarray(i, i + 0x8000)); return btoa(s); }
+
+const fontsReady = Promise.all([document.fonts.load('80px "Yuji Syuku"', '龍斬侍完'), document.fonts.load('800 30px "Shippori Mincho"'), document.fonts.load('500 30px "Shippori Mincho"')]).catch(() => {}).then(() => document.fonts.ready);
+if (RENDER) { window.__film = { duration: DUR, frame: t => { frame(t); return true; }, audio: renderAudio, ready: fontsReady.then(() => true) }; }
+else {
+  const bar = document.querySelector('#bar i'), pp = document.getElementById('pp');
+  const play = from => { startAudio(from); started = true; document.getElementById('start').hidden = true; pp.textContent = 'Pausa'; };
+  document.getElementById('play').onclick = () => play(0);
+  document.getElementById('rs').onclick = () => play(0);
+  pp.onclick = () => { if (!started) return play(0); if (playing) { pausedT = curT(); playing = false; actx && actx.suspend(); pp.textContent = 'Riprendi'; } else if (actx && pausedT < DUR - .05) { actx.resume(); playing = true; pp.textContent = 'Pausa'; } else play(0); };
+  document.getElementById('bar').onclick = e => { const r = e.currentTarget.getBoundingClientRect(); play(clamp((e.clientX - r.left) / r.width) * DUR); };
+  fontsReady.then(() => { const loop = () => { requestAnimationFrame(loop); let t = started ? curT() : 31.0; if (started && playing && t >= DUR) { playing = false; pausedT = DUR - .01; t = pausedT; stopAudio(); pp.textContent = 'Da capo'; } frame(Math.min(t, DUR - .01)); bar.style.width = (clamp(t / DUR) * 100) + '%'; }; loop(); });
+}
+</script>
+</body>
+</html>
