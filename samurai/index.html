@@ -455,7 +455,7 @@ const EV = []; const ev = (t, fn) => EV.push({ t, fn });
 function engine(ctx) {
   const sr = ctx.sampleRate, nb = ctx.createBuffer(2, sr * 4, sr), nr = rng(42);
   for (let ch = 0; ch < 2; ch++) { const d = nb.getChannelData(ch); for (let i = 0; i < d.length; i++) d[i] = nr() * 2 - 1; }
-  const master = ctx.createGain(); master.gain.value = .9; const comp = ctx.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 3.5; comp.attack.value = .004; comp.release.value = .3; master.connect(comp); comp.connect(ctx.destination);
+  const master = ctx.createGain(); master.gain.value = .72; const comp = ctx.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 3.5; comp.attack.value = .004; comp.release.value = .3; master.connect(comp); comp.connect(ctx.destination);
   const ir = ctx.createBuffer(2, sr * 4.5, sr); for (let ch = 0; ch < 2; ch++) { const d = ir.getChannelData(ch); for (let i = 0; i < d.length; i++) d[i] = (nr() * 2 - 1) * Math.pow(1 - i / d.length, 2.6); }
   const verb = ctx.createConvolver(); verb.buffer = ir; const vg = ctx.createGain(); vg.gain.value = .42; verb.connect(vg); vg.connect(master);
   const bus = (gn, send) => { const n = ctx.createGain(); n.gain.value = gn; n.connect(master); const s = ctx.createGain(); s.gain.value = send; n.connect(s); s.connect(verb); return n; };
