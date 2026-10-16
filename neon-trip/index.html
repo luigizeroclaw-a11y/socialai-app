@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Neon Trip</title>
+<style>
+  :root{ --bg:#05030a; --fg:#f2f0ff; --hot:#ff2bd6; --cyan:#22f2ff; --lime:#7dff3a; color-scheme:dark }
+  @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){ --bg:#05030a; --fg:#f2f0ff; --hot:#ff2bd6; --cyan:#22f2ff; --lime:#7dff3a } }
+  :root[data-theme="dark"]{ --bg:#05030a; --fg:#f2f0ff; --hot:#ff2bd6; --cyan:#22f2ff; --lime:#7dff3a }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:ui-monospace,"DejaVu Sans Mono",monospace;overflow:hidden}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  #stage{position:relative;aspect-ratio:16/9;width:min(100vw,calc(100vh*16/9));max-width:100%;container-type:size;background:#000}
+  canvas{position:absolute;inset:0;width:100%;height:100%;display:block;image-rendering:pixelated}
+  #start{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3cqh;background:rgba(5,3,10,.6);z-index:3}
+  #start p{margin:0;font-size:1.6cqw;color:var(--cyan);letter-spacing:.2em;text-transform:uppercase}
+  #play{all:unset;cursor:pointer;padding:1.6cqh 3cqw;border:.3cqw solid var(--hot);color:var(--hot);font-size:2.2cqw;letter-spacing:.3em;box-shadow:0 0 2cqw var(--hot),inset 0 0 1.4cqw rgba(255,43,214,.4)}
+  #play:hover{background:var(--hot);color:var(--bg)} #play:focus-visible,#ctl button:focus-visible{outline:3px solid var(--cyan);outline-offset:4px}
+  #ctl{position:absolute;left:0;right:0;bottom:0;display:flex;gap:1cqw;align-items:center;padding:1cqh 2cqw;opacity:0;transition:opacity .3s;background:linear-gradient(transparent,rgba(0,0,0,.7));z-index:2}
+  #stage:hover #ctl,#ctl:focus-within{opacity:1}
+  #ctl button{all:unset;cursor:pointer;color:var(--fg);font-size:max(12px,1.2cqw);padding:.4em .8em;border:1px solid var(--cyan)}
+  #bar{flex:1;height:6px;background:rgba(255,255,255,.2);cursor:pointer;position:relative}
+  #bar i{position:absolute;left:0;top:0;bottom:0;background:var(--hot);width:0}
+  body.render #ctl,body.render #start{display:none}
+  body.render #wrap{inset:auto;left:0;top:0;width:1280px;height:720px} body.render #stage{width:1280px}
+  @media (prefers-reduced-motion: reduce){ #play{box-shadow:none} }
+</style>
+</head>
+<body>
+<div id="wrap"><div id="stage">
+  <canvas id="c" width="1280" height="720"></canvas>
+  <div id="start"><p>60 secondi · 128 bpm · volume alto</p><button id="play">▶ PLAY</button><p style="color:#ff2bd6;font-size:1.1cqw">contiene luci lampeggianti</p></div>
+  <div id="ctl"><button id="pp">Pausa</button><button id="rs">Da capo</button><div id="bar"><i></i></div></div>
+</div></div>
+<script>
+'use strict';
+const RENDER = new URLSearchParams(location.search).has('render');
+if (RENDER) document.body.classList.add('render');
+const W = 1280, H = 720, PW = 320, PH = 180;
+const BPM = 128, BEAT = 60 / BPM, BAR = BEAT * 4, BARS = 32, DUR = BAR * BARS;   // 60 s
+const out = document.getElementById('c').getContext('2d'); out.imageSmoothingEnabled = false;
+const bufC = document.createElement('canvas'); bufC.width = PW; bufC.height = PH; const b = bufC.getContext('2d');
+const tmpC = document.createElement('canvas'); tmpC.width = PW; tmpC.height = PH; const tmp = tmpC.getContext('2d');
+const img = b.createImageData(PW, PH), px = img.data;
+
+/* ---------- math ---------- */
+const clamp = (x, a = 0, c = 1) => Math.min(c, Math.max(a, x));
+const lerp = (a, c, t) => a + (c - a) * t;
+const seg = (t, a, c) => clamp((t - a) / (c - a));
+const sstep = (a, c, x) => { const t = clamp((x - a) / (c - a)); return t * t * (3 - 2 * t); };
+function rng(seed) { return function () { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const hash = (a, c = 0) => { const s = Math.sin(a * 127.1 + c * 311.7) * 43758.5453; return s - Math.floor(s); };
+function hsl(h, s, l) { h = ((h % 1) + 1) % 1; const k = n => (n + h * 12) % 12, a = s * Math.min(l, 1 - l), f = n => l - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1)); return [f(0) * 255 | 0, f(8) * 255 | 0, f(4) * 255 | 0]; }
+const css = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+const NEON = [[255, 43, 214], [34, 242, 255], [125, 255, 58], [255, 214, 10], [255, 92, 40], [150, 70, 255], [255, 255, 255]];
+const bar = t => Math.floor(t / BAR), beatOf = t => t / BEAT;
+
+/* ---------- song map ---------- */
+const S = { intro: 0, tetris: 4, breakdown: 12, drop: 14, matrix: 22, climax: 26, outro: 30 };
+const at = br => br * BAR;
+const kickOn = br => (br >= 1 && br < 12) || (br >= 14 && br < 30) || br === 30;
+const KICKS = []; for (let br = 0; br < BARS; br++) if (kickOn(br)) for (let k = 0; k < 4; k++) { if (br === 1 && k < 2) continue; if (br === 30 && k > 0) continue; KICKS.push(at(br) + k * BEAT); }
+const LAUGHS = [];
+for (let br = 14; br < 30; br++) { if (br >= 22 && br < 26) continue; const t0 = at(br);
+  const set = (br % 2 === 0) ? [[2, 330], [2.5, 300], [3, 270]] : [[2, 360], [2.25, 340], [2.5, 320], [3.5, 400]];
+  for (const [bt, p] of set) LAUGHS.push({ t: t0 + bt * BEAT, p });
+  if (br >= 26) for (const [bt, p] of [[0.5, 420], [1.5, 380]]) LAUGHS.push({ t: t0 + bt * BEAT, p }); }
+LAUGHS.sort((a, c) => a.t - c.t);
+function lastBefore(arr, t, key) { let lo = 0, hi = arr.length - 1, r = -1; while (lo <= hi) { const m = (lo + hi) >> 1; const v = key ? arr[m][key] : arr[m]; if (v <= t) { r = m; lo = m + 1; } else hi = m - 1; } return r; }
+const kickEnv = t => { const i = lastBefore(KICKS, t); return i < 0 ? 0 : Math.exp(-(t - KICKS[i]) / .11); };
+const laughEnv = t => { const i = lastBefore(LAUGHS, t, 't'); return i < 0 ? 0 : Math.exp(-(t - LAUGHS[i].t) / .14); };
+
+/* ---------- pixel font 3x5 ---------- */
+const FONT = {
+  A: '010101111101101', B: '110101110101110', C: '011100100100011', D: '110101101101110', E: '111100110100111', F: '111100110100100', G: '011100101101011', H: '101101111101101', I: '111010010010111', K: '101101110101101', L: '100100100100111', M: '101111111101101', N: '110101101101101', O: '010101101101010', P: '110101110100100', R: '110101110101101', S: '011100010001110', T: '111010010010010', U: '101101101101111', V: '101101101101010', W: '101101111111101', X: '101101010101101', Y: '101101010010010', Z: '111001010100111',
+  '0': '111101101101111', '1': '010110010010111', '2': '110001010100111', '3': '110001010001110', '4': '101101111001001', '5': '111100110001110', '6': '011100111101111', '7': '111001010010010', '8': '111101111101111', '9': '111101111001110', '!': '010010010000010', '.': '000000000000010', ':': '000010000010000', '-': '000000111000000', ' ': '000000000000000', '/': '001001010100100', '♥': '000101111111010'
+};
+function text(c, s, x, y, col, sc = 1, center = false) { s = s.toUpperCase(); if (center) x -= (s.length * 4 - 1) * sc / 2; c.fillStyle = col; for (const ch of s) { const f = FONT[ch] || FONT[' ']; for (let i = 0; i < 15; i++) if (f[i] === '1') c.fillRect(x + (i % 3) * sc, y + Math.floor(i / 3) * sc, sc, sc); x += 4 * sc; } }
+function glyph(c, seed, x, y, col) { c.fillStyle = col; for (let i = 0; i < 15; i++) if (hash(seed, i) > .52) c.fillRect(x + (i % 3), y + Math.floor(i / 3), 1, 1); }
+
+/* ---------- backgrounds ---------- */
+function plasma(t, hueSpeed = .1, amt = 1, dark = 0) {
+  const kp = kickEnv(t);
+  for (let y = 0; y < PH; y++) for (let x = 0; x < PW; x++) {
+    const dx = x - 160, dy = y - 90, d = Math.sqrt(dx * dx + dy * dy);
+    const v = Math.sin(x * .045 + t * 1.1) + Math.sin(y * .06 - t * 1.4) + Math.sin((x + y) * .03 + t * .7) + Math.sin(d * .09 - t * 3 - kp * 2);
+    const q = Math.floor((v * .125 + .5 + t * hueSpeed) * 8) / 8; // posterize = pixel art bands
+    const c = PAL[(Math.floor(q * 64) % 64 + 64) % 64]; const i = (y * PW + x) * 4; const l = amt * (1 - dark);
+    px[i] = c[0] * l; px[i + 1] = c[1] * l; px[i + 2] = c[2] * l; px[i + 3] = 255;
+  }
+  b.putImageData(img, 0, 0);
+}
+const PAL = []; for (let i = 0; i < 64; i++) PAL.push(hsl(i / 64, 1, .5 + .12 * Math.sin(i / 64 * Math.PI * 6)));
+function tunnel(t, amt = 1) {
+  const kp = kickEnv(t); const cx = 160 + Math.sin(t * .7) * 30, cy = 90 + Math.cos(t * .5) * 18;
+  for (let y = 0; y < PH; y++) for (let x = 0; x < PW; x++) {
+    const dx = x - cx, dy = y - cy, d = Math.sqrt(dx * dx + dy * dy) + .5, a = Math.atan2(dy, dx);
+    const u = 40 / d + t * 1.6, v = a / Math.PI * 4 + t * .3;
+    const chk = ((Math.floor(u * 4) + Math.floor(v * 4)) & 1);
+    const c = PAL[(Math.floor((u * .5 + v * .25 + t * .2) * 64) % 64 + 64) % 64]; const sh = clamp(d / 70) * (chk ? 1 : .35) * amt * (1 + kp * .4);
+    const i = (y * PW + x) * 4; px[i] = Math.min(255, c[0] * sh); px[i + 1] = Math.min(255, c[1] * sh); px[i + 2] = Math.min(255, c[2] * sh); px[i + 3] = 255;
+  }
+  b.putImageData(img, 0, 0);
+}
+function synthGrid(t) {
+  const sky = b.createLinearGradient(0, 0, 0, 100); sky.addColorStop(0, '#07021a'); sky.addColorStop(1, '#3a0a4a'); b.fillStyle = sky; b.fillRect(0, 0, PW, 100);
+  // sun with stripes
+  for (let y = 0; y < 44; y++) { if (y > 22 && (y % 6) < (y - 22) / 6) continue; const w = Math.sqrt(Math.max(0, 22 * 22 - (y - 22) * (y - 22))); const c = [255, lerp(220, 40, y / 44), lerp(60, 180, y / 44)]; b.fillStyle = css(c); b.fillRect(160 - w, 56 + y, w * 2, 1); }
+  b.fillStyle = '#05010e'; b.fillRect(0, 100, PW, 80);
+  const kp = kickEnv(t);
+  b.fillStyle = css([255, 43, 214], .7 + kp * .3); for (let i = -16; i <= 16; i++) { for (let y = 100; y < PH; y++) { const z = (y - 99) / 80; const x = 160 + i * 18 * z * 6; b.fillRect(Math.round(x), y, 1, 1); } }
+  b.fillStyle = css([34, 242, 255], .8); for (let k = 0; k < 10; k++) { const z = ((k + (t * 2) % 1) / 10); const y = Math.round(100 + Math.pow(z, 2.2) * 80); b.fillRect(0, y, PW, 1); }
+  b.fillStyle = '#ff2bd6'; b.fillRect(0, 100, PW, 1);
+}
+function matrixRain(t, amt = 1, rainbow = false, speed = 1) {
+  const cols = 80; for (let cI = 0; cI < cols; cI++) {
+    const sp = (18 + hash(cI) * 40) * speed, len = 8 + Math.floor(hash(cI, 2) * 18), off = hash(cI, 3) * 400;
+    const head = ((t * sp + off) % (PH / 6 + len + 10)) - 4; const x = cI * 4;
+    for (let k = 0; k < len; k++) { const r = Math.floor(head) - k; if (r < 0 || r * 6 > PH) continue; const a = (1 - k / len) * amt; if (a <= 0) continue;
+      const seed = cI * 97 + r * 13 + Math.floor(t * (k === 0 ? 12 : 2) + hash(cI, r)) ;
+      const col = k === 0 ? css([230, 255, 230], a) : rainbow ? css(hsl(cI / cols + t * .2 + r * .02, 1, .55), a) : css([40, 255, 90], a * .85);
+      glyph(b, seed, x, r * 6, col); }
+  }
+}
+
+/* ---------- tetris (deterministic AI game) ---------- */
+const SHAPES = { I: [[0, 1], [1, 1], [2, 1], [3, 1]], O: [[1, 0], [2, 0], [1, 1], [2, 1]], T: [[1, 0], [0, 1], [1, 1], [2, 1]], S: [[1, 0], [2, 0], [0, 1], [1, 1]], Z: [[0, 0], [1, 0], [1, 1], [2, 1]], J: [[0, 0], [0, 1], [1, 1], [2, 1]], L: [[2, 0], [0, 1], [1, 1], [2, 1]] };
+const PCOL = { I: NEON[1], O: NEON[3], T: NEON[5], S: NEON[2], Z: NEON[0], J: [60, 120, 255], L: NEON[4] };
+const rot = (cells, r) => { let c = cells.map(p => p.slice()); for (let i = 0; i < r; i++) c = c.map(([x, y]) => [-y, x]); const mx = Math.min(...c.map(p => p[0])), my = Math.min(...c.map(p => p[1])); return c.map(([x, y]) => [x - mx, y - my]); };
+const BW = 10, BH = 20;
+const GAME = (() => {
+  const r = rng(2024); let bag = []; const next = () => { if (!bag.length) { bag = Object.keys(SHAPES); for (let i = bag.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [bag[i], bag[j]] = [bag[j], bag[i]]; } } return bag.pop(); };
+  let board = Array.from({ length: BH }, () => Array(BW).fill(null)); const steps = []; let lines = 0, score = 0;
+  const fits = (cells, x, y) => cells.every(([cx, cy]) => { const X = cx + x, Y = cy + y; return X >= 0 && X < BW && Y < BH && (Y < 0 || !board[Y][X]); });
+  // pre-fill some garbage so lines clear early (looks like a game in progress)
+  for (let y = BH - 6; y < BH; y++) for (let x = 0; x < BW; x++) if (hash(x, y) > .38 && x !== (y * 3) % BW) board[y][x] = Object.keys(SHAPES)[(x + y) % 7];
+  let piece = next(), upcoming = next();
+  for (let n = 0; n < 40; n++) {
+    let best = null;
+    for (let ro = 0; ro < 4; ro++) { const cells = rot(SHAPES[piece], ro); const w = Math.max(...cells.map(p => p[0])) + 1;
+      for (let x = 0; x <= BW - w; x++) { let y = -2; if (!fits(cells, x, y)) continue; while (fits(cells, x, y + 1)) y++;
+        const B2 = board.map(rw => rw.slice()); cells.forEach(([cx, cy]) => { if (cy + y >= 0) B2[cy + y][cx + x] = piece; });
+        const full = B2.filter(rw => rw.every(Boolean)).length; const hts = []; let holes = 0;
+        for (let cx = 0; cx < BW; cx++) { let h = 0, seen = false; for (let cy = 0; cy < BH; cy++) { if (B2[cy][cx]) { if (!seen) { h = BH - cy; seen = true; } } else if (seen) holes++; } hts.push(h); }
+        const agg = hts.reduce((a, c) => a + c, 0) , bump = hts.slice(1).reduce((a, c, i) => a + Math.abs(c - hts[i]), 0);
+        const sc = -.51 * agg + .76 * full * full - .36 * holes * 1.4 - .18 * bump;
+        if (!best || sc > best.sc) best = { sc, cells, x, y, ro }; } }
+    const before = board.map(rw => rw.slice());
+    best.cells.forEach(([cx, cy]) => { if (cy + best.y >= 0) board[cy + best.y][cx + best.x] = piece; });
+    const cleared = []; board.forEach((rw, i) => { if (rw.every(Boolean)) cleared.push(i); });
+    const afterLock = board.map(rw => rw.slice());
+    if (cleared.length) { board = board.filter((rw, i) => !cleared.includes(i)); while (board.length < BH) board.unshift(Array(BW).fill(null)); lines += cleared.length; score += [0, 100, 300, 500, 800][cleared.length]; }
+    steps.push({ before, afterLock, piece, cells: best.cells, x: best.x, y: best.y, cleared, lines, score, next: upcoming });
+    piece = upcoming; upcoming = next();
+    if (board[2].some(Boolean)) { board = Array.from({ length: BH }, () => Array(BW).fill(null)); }
+  }
+  return steps;
+})();
+function cell(c, x, y, s, col, a = 1, glow = 0) { c.fillStyle = css(col.map(v => v * .55), a); c.fillRect(x, y, s, s); c.fillStyle = css(col, a); c.fillRect(x + 1, y + 1, s - 2, s - 2); c.fillStyle = css([255, 255, 255], a * (.55 + glow * .45)); c.fillRect(x + 1, y + 1, s - 3, 1); c.fillRect(x + 1, y + 1, 1, s - 3); }
+function drawTetris(t, ox, oy, cs) {
+  const bt = beatOf(t - at(S.tetris)); const n = Math.floor(bt), f = bt - n; if (n < 0) return; const st = GAME[Math.min(n, GAME.length - 1)];
+  b.fillStyle = 'rgba(5,1,14,.86)'; b.fillRect(ox - 2, oy - 2, BW * cs + 4, BH * cs + 4);
+  b.strokeStyle = css(NEON[0], .9 + kickEnv(t) * .1); b.lineWidth = 1; b.strokeRect(ox - 1.5, oy - 1.5, BW * cs + 3, BH * cs + 3);
+  // during the first ~70% of the beat the piece falls, then it locks and full lines flash
+  const fallEnd = .72; const locked = f >= fallEnd; const grid = locked ? st.afterLock : st.before;
+  for (let y = 0; y < BH; y++) for (let x = 0; x < BW; x++) { const p = grid[y][x]; if (!p) continue; let col = PCOL[p]; let a = 1;
+    if (locked && st.cleared.includes(y)) { const fl = Math.floor((f - fallEnd) * 40) % 2; col = fl ? [255, 255, 255] : col; a = 1 - seg(f, .9, 1) ; }
+    cell(b, ox + x * cs, oy + y * cs, cs, col, a); }
+  if (!locked) { const yy = lerp(-3, st.y, Math.pow(f / fallEnd, 2)); for (const [cx, cy] of st.cells) { const Y = Math.floor(yy) + cy; if (Y < 0) continue; cell(b, ox + (cx + st.x) * cs, oy + Y * cs, cs, PCOL[st.piece], 1, 1); }
+    // ghost
+    for (const [cx, cy] of st.cells) { b.strokeStyle = css(PCOL[st.piece], .45); b.strokeRect(ox + (cx + st.x) * cs + .5, oy + (cy + st.y) * cs + .5, cs - 1, cs - 1); } }
+  if (locked && st.cleared.length) { const a = 1 - seg(f, fallEnd, 1); b.fillStyle = css([255, 255, 255], a * .25); b.fillRect(0, 0, PW, PH); text(b, st.cleared.length === 4 ? 'TETRIS!' : st.cleared.length + ' LINE' + (st.cleared.length > 1 ? 'S' : ''), ox + BW * cs / 2, oy + 60, css(NEON[3], a), 2, true); }
+  // side panel
+  const sx = ox + BW * cs + 10; text(b, 'SCORE', sx, oy + 4, '#22f2ff'); text(b, String(st.score).padStart(5, '0'), sx, oy + 12, '#ffffff');
+  text(b, 'LINES', sx, oy + 26, '#22f2ff'); text(b, String(st.lines).padStart(3, '0'), sx, oy + 34, '#ffffff');
+  text(b, 'NEXT', sx, oy + 50, '#22f2ff'); for (const [cx, cy] of rot(SHAPES[st.next], 0)) cell(b, sx + cx * 6, oy + 60 + cy * 6, 6, PCOL[st.next]);
+  text(b, 'LV 128', sx, oy + 82, '#ff2bd6');
+}
+
+/* ---------- laughing faces ---------- */
+function disc(c, x, y, r, col) { c.fillStyle = col; for (let yy = -r; yy <= r; yy++) { const w = Math.floor(Math.sqrt(r * r - yy * yy)); c.fillRect(Math.round(x - w), Math.round(y + yy), w * 2 + 1, 1); } }
+function face(c, x, y, r, col, open, t, seed = 0) {
+  disc(c, x, y, r + 1, '#0a0410'); disc(c, x, y, r, css(col)); disc(c, x - r * .25, y - r * .3, r * .45, css(col.map(v => Math.min(255, v + 60)), .5));
+  const e = Math.max(1, Math.round(r / 6)), ex = Math.round(r * .38), ey = Math.round(y - r * .25);
+  // squinting laugh eyes ^ ^
+  c.fillStyle = '#0a0410'; for (const s of [-1, 1]) { const cx = Math.round(x + s * ex); for (let k = -2; k <= 2; k++) c.fillRect(cx + k * e, ey + Math.abs(k) * e - e, e, e); }
+  // tears of joy
+  if (open > .35) { c.fillStyle = '#22f2ff'; for (const s of [-1, 1]) { const tx = Math.round(x + s * (ex + 3 * e)), ty = Math.round(ey + e * 2 + ((t * 30 + seed) % (r * .8))); c.fillRect(tx, ty, e, e * 2); } }
+  // mouth
+  const mw = Math.round(r * .62), mh = Math.max(e, Math.round(r * (.18 + .5 * open))), my = Math.round(y + r * .18);
+  c.fillStyle = '#0a0410'; for (let yy = 0; yy < mh; yy++) { const w = Math.round(mw * Math.sqrt(1 - Math.pow(yy / mh, 2))); c.fillRect(Math.round(x - w), my + yy, w * 2, 1); }
+  if (mh > 3 * e) { c.fillStyle = '#ff5c8a'; const tw = Math.round(mw * .5); c.fillRect(Math.round(x - tw), my + mh - 2 * e, tw * 2, e * 2 - 1); c.fillStyle = '#ffffff'; c.fillRect(Math.round(x - mw * .7), my, Math.round(mw * 1.4), e); }
+}
+function kaleido() { tmp.clearRect(0, 0, PW, PH); tmp.drawImage(bufC, 0, 0); b.save(); b.translate(PW, 0); b.scale(-1, 1); b.drawImage(tmpC, 0, 0, PW / 2, PH, 0, 0, PW / 2, PH); b.restore(); tmp.drawImage(bufC, 0, 0); b.save(); b.translate(0, PH); b.scale(1, -1); b.drawImage(tmpC, 0, 0, PW, PH / 2, 0, 0, PW, PH / 2); b.restore(); }
+
+/* ---------- smiley built from falling tetris blocks ---------- */
+const SMILE = [
+  '......XXXXXXXX......', '....XX........XX....', '...X............X...', '..X...XX....XX...X..', '..X..XXXX..XXXX..X..', '..X..............X..', '..X..XXXXXXXXXX..X..', '...X..XX....XX..X...', '....XX..XXXX..XX....', '......XXXXXXXX......', '....................'];
+const SCELLS = []; SMILE.forEach((row, y) => [...row].forEach((ch, x) => { if (ch === 'X') SCELLS.push({ x, y }); }));
+SCELLS.sort((a, c) => c.y - a.y || hash(a.x, a.y) - hash(c.x, c.y));
+
+/* ---------- transitions (minimal) ---------- */
+function lineWipe(t, t0, horiz = true) { const k = Math.abs(t - t0) / .28; if (k >= 1) return; const s = easeIO(k); tmp.clearRect(0, 0, PW, PH); tmp.drawImage(bufC, 0, 0); b.fillStyle = '#000'; b.fillRect(0, 0, PW, PH);
+  if (horiz) { const h = Math.max(1, PH * s); b.drawImage(tmpC, 0, 0, PW, PH, 0, (PH - h) / 2, PW, h); b.fillStyle = '#fff'; b.fillRect(0, Math.floor(PH / 2), PW * (1 - s * .0), 1); }
+  else { const w = Math.max(1, PW * s); b.drawImage(tmpC, 0, 0, PW, PH, (PW - w) / 2, 0, w, PH); b.fillStyle = '#fff'; b.fillRect(Math.floor(PW / 2), 0, 1, PH); } }
+function iris(t, t0, dur = .35) { const k = Math.abs(t - t0) / dur; if (k >= 1) return; const r = Math.max(.5, easeIO(k) * 190); tmp.clearRect(0, 0, PW, PH); tmp.drawImage(bufC, 0, 0); b.fillStyle = '#000'; b.fillRect(0, 0, PW, PH); b.save(); b.beginPath(); b.arc(160, 90, r, 0, 7); b.clip(); b.drawImage(tmpC, 0, 0); b.restore(); if (r < 3) { b.fillStyle = '#fff'; b.fillRect(159, 89, 2, 2); } }
+function checker(t, t0, dur = .5) { const k = (t - t0 + dur) / (2 * dur); if (k <= 0 || k >= 1) return; const cs = 20; for (let y = 0; y < PH / cs; y++) for (let x = 0; x < PW / cs; x++) { const order = ((x + y) % 2) * .5 + hash(x, y) * .4; const on = k < .5 ? (k * 2 > order) : ((k - .5) * 2 < order); if (on) { b.fillStyle = '#000'; b.fillRect(x * cs, y * cs, cs, cs); } } }
+const easeIO = x => x < .5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
+
+/* ---------- glitch ---------- */
+function glitch(amt, t) { if (amt <= .02) return; tmp.clearRect(0, 0, PW, PH); tmp.drawImage(bufC, 0, 0); const n = Math.floor(amt * 10); for (let i = 0; i < n; i++) { const y = Math.floor(hash(Math.floor(t * 30), i) * PH), h = 1 + Math.floor(hash(i, Math.floor(t * 30)) * 8), dx = Math.round((hash(i * 3, Math.floor(t * 30)) - .5) * 40 * amt); b.drawImage(tmpC, 0, y, PW, h, dx, y, PW, h); } }
+
+/* ---------- FRAME ---------- */
+function frame(t) {
+  b.setTransform(1, 0, 0, 1, 0, 0); b.globalAlpha = 1; b.globalCompositeOperation = 'source-over';
+  const br = bar(t), kp = kickEnv(t), lp = laughEnv(t), bt = beatOf(t);
+  b.fillStyle = '#000'; b.fillRect(0, 0, PW, PH);
+  if (br < S.tetris) {
+    // INTRO: matrix rain gathers, title glitches in
+    matrixRain(t, sstep(0, 3, t));
+    const a = sstep(at(2), at(2) + .4, t);
+    if (a > 0) { const j = (hash(Math.floor(t * 20)) - .5) * 4 * (1 - seg(t, at(2), at(3))); b.fillStyle = 'rgba(0,0,0,.6)'; b.fillRect(40, 58, 240, 64);
+      text(b, 'NEON', 160 + j, 64, css(NEON[0], a), 6, true); text(b, 'TRIP', 160 - j, 98, css(NEON[1], a), 4, true);
+      if (t > at(3)) text(b, 'UNA CANZONE TECHNO IN PIXEL', 160, 130, css([200, 255, 210], sstep(at(3), at(3) + .3, t)), 1, true); }
+    if (t > at(1)) { const pr = clamp((t - at(1)) / (at(4) - at(1))); b.fillStyle = css(NEON[0]); b.fillRect(0, PH - 2, PW * pr, 2); }
+  } else if (br < S.breakdown) {
+    // TETRIS on a synthwave grid
+    synthGrid(t); if (br >= 8) { matrixRain(t, .35 * sstep(at(8), at(9), t), true); }
+    drawTetris(t, 110, 9, 8);
+    // tiny laughing faces watching on the left, bouncing to the beat
+    if (br >= 6) for (let i = 0; i < 3; i++) { const yb = 120 + i * 0 - Math.abs(Math.sin((bt + i * .3) * Math.PI)) * 8; face(b, 40 + i * 22, yb, 8, NEON[[3, 2, 1][i]], kp * .8, t, i); }
+    text(b, 'BPM 128', 14, 14, css(NEON[1], .9)); text(b, 'PLAYER 1', 14, 22, css(NEON[0], .9));
+  } else if (br < S.drop) {
+    // BREAKDOWN: minimal. one pixel face breathing in the dark, then the riser.
+    const u = seg(t, at(12), at(14)); const r = Math.round(lerp(3, 40, Math.pow(u, 2)));
+    if (br === 12) { matrixRain(t, .18, false, .4); }
+    else plasma(t, .3, sstep(at(13), at(14), t) * .7, 0);
+    face(b, 160, 90, r, hsl(t * .2, 1, .55), Math.pow(u, 3) * (.5 + .5 * Math.sin(t * 30)), t);
+    if (br === 13) { const k = seg(t, at(13), at(14)); for (let i = 0; i < 40 * k; i++) { const a = hash(i) * 6.28, d = (1 - ((t * 2 + hash(i, 1)) % 1)) * 160; b.fillStyle = css(NEON[i % 6]); b.fillRect(160 + Math.cos(a) * d, 90 + Math.sin(a) * d, 2, 2); } }
+    if (br === 12) text(b, '...', 160, 140, css([255, 255, 255], .5 + .5 * Math.sin(t * 4)), 2, true);
+  } else if (br < S.matrix) {
+    // DROP: tunnel + army of laughing faces + HA HA
+    tunnel(t, .9);
+    const mode = Math.floor((br - S.drop) / 2) % 2;
+    if (mode === 0) { for (let gy = 0; gy < 3; gy++) for (let gx = 0; gx < 6; gx++) { const i = gy * 6 + gx; const x = 30 + gx * 52 + Math.sin(t * 2 + i) * 4, y = 32 + gy * 58 - Math.abs(Math.sin((bt + i * .17) * Math.PI)) * 8 * (1 + kp); face(b, x, y, 17, hsl(i / 18 + t * .25, 1, .55), Math.min(1, lp * 1.2 + kp * .15), t, i); } }
+    else { for (let i = 0; i < 8; i++) { const a = i / 8 * 6.28 + t * 1.5, R = 76 + Math.sin(t * 3 + i) * 6; face(b, 160 + Math.cos(a) * R * 1.5, 92 + Math.sin(a) * R * .8, 11, hsl(i / 8 - t * .2, 1, .55), lp, t, i); } }
+    if (br >= 18) kaleido();
+    if (mode === 1) face(b, 160, 92, 48 + Math.round(kp * 5), hsl(t * .3, 1, .55), Math.min(1, lp * 1.3), t);
+    const li = lastBefore(LAUGHS, t, 't'); if (li >= 0 && t - LAUGHS[li].t < .22) { const L = LAUGHS[li]; const sc = 3 + Math.round((1 - (t - L.t) / .22) * 3); const hx = 40 + hash(li) * 240, hy = 20 + hash(li, 1) * 130; text(b, 'HA', hx + 1, hy + 1, '#000', sc, true); text(b, 'HA', hx, hy, css(NEON[li % 6]), sc, true); }
+  } else if (br < S.climax) {
+    // MATRIX x TETRIS: neon rain; tetris blocks fall and build a giant smiley
+    matrixRain(t, 1, true, 1.4);
+    const u = seg(t, at(22), at(25) + BAR * .5); const n = Math.floor(u * SCELLS.length);
+    const cs = 16, ox = 0, oy = 2;
+    for (let i = 0; i < SCELLS.length; i++) { const c = SCELLS[i]; const ti = at(22) + (i / SCELLS.length) * (at(25) + BAR * .5 - at(22)); const f = seg(t, ti, ti + BEAT); if (f <= 0) continue; const y = lerp(-cs * 2, oy + c.y * cs, f * f);
+      const isMouth = c.y >= 6 && c.y <= 9; const blink = br === 25 && c.y === 4 && (bt % 2) > 1.6; if (blink) continue;
+      let col = hsl(c.y / 11 + t * .15, 1, .55); if (br === 25 && isMouth) col = (Math.floor(bt * 2) % 2) ? NEON[0] : NEON[3];
+      cell(b, ox + c.x * cs, y, cs, col, 1, f >= 1 ? kp : 0); }
+    if (br === 25) { const a = seg(t, at(25) + BAR * .5, at(26)); text(b, 'HA HA HA', 160, 160, css([255, 255, 255], a), 3, true); }
+    if (br === 22) text(b, 'WAKE UP NEO', 160, 80, css([180, 255, 190], pulseA(t, at(22), at(23))), 2, true);
+  } else if (br < S.outro) {
+    // CLIMAX: plasma + kaleidoscope + orbiting tetrominoes + faces
+    plasma(t, .45, .95, 0);
+    const keys = Object.keys(SHAPES);
+    for (let i = 0; i < 10; i++) { const a = i / 10 * 6.28 + t * (i % 2 ? 1.2 : -1), R = 54 + 20 * Math.sin(t * 2 + i); const k = keys[i % 7]; const cells = rot(SHAPES[k], Math.floor(bt + i) % 4); for (const [cx, cy] of cells) cell(b, 160 + Math.cos(a) * R * 1.6 + cx * 7 - 10, 90 + Math.sin(a) * R + cy * 7 - 7, 7, PCOL[k]); }
+    kaleido();
+    face(b, 160, 90, 40 + Math.round(kp * 7), hsl(t * .5, 1, .6), Math.min(1, lp * 1.4 + .1), t);
+    const li = lastBefore(LAUGHS, t, 't'); if (li >= 0 && t - LAUGHS[li].t < .2) { const sc = 4; text(b, 'HA', 80 + hash(li) * 160, 30 + hash(li, 2) * 110, css(NEON[6]), sc, true); }
+    if (kp > .7 && br % 2 === 1) { b.fillStyle = css([255, 255, 255], (kp - .7) * .9); b.fillRect(0, 0, PW, PH); }
+  } else {
+    // OUTRO: the whole trip collapses into a single pixel
+    const u = seg(t, at(30), DUR - .2);
+    matrixRain(t, 1 - u, true, .6 + (1 - u));
+    face(b, 160, 90, Math.max(1, Math.round(30 * (1 - u))), hsl(t * .2, 1, .6), .3 * (1 - u), t);
+    if (u > .55) { const a = sstep(.55, .7, u) * (1 - sstep(.92, 1, u)); text(b, 'FINE', 160, 120, css(NEON[0], a), 3, true); text(b, 'MUSICA E PIXEL FATTI IN CODICE', 160, 140, css([255, 255, 255], a * .8), 1, true); }
+  }
+  // transitions on the bar lines
+  lineWipe(t, at(S.tetris), true);
+  iris(t, at(S.drop), .4);
+  checker(t, at(S.matrix), .45);
+  lineWipe(t, at(S.climax), false);
+  lineWipe(t, at(S.breakdown), true);
+  iris(t, at(S.outro), .35);
+  glitch((t > at(S.drop) && t < at(S.outro) ? kp * .6 : 0) + (Math.abs(t - at(S.climax)) < .3 ? .8 : 0), t);
+  // upscale with crisp pixels + CRT scanlines
+  out.setTransform(1, 0, 0, 1, 0, 0); out.imageSmoothingEnabled = false; out.drawImage(bufC, 0, 0, W, H);
+  out.fillStyle = 'rgba(0,0,0,.18)'; for (let y = 0; y < H; y += 4) out.fillRect(0, y + 3, W, 1);
+  const vg = out.createRadialGradient(W / 2, H / 2, H * .45, W / 2, H / 2, H * .95); vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.45)'); out.fillStyle = vg; out.fillRect(0, 0, W, H);
+  if (t > DUR - .25) { out.fillStyle = `rgba(0,0,0,${seg(t, DUR - .25, DUR)})`; out.fillRect(0, 0, W, H); }
+}
+const pulseA = (t, a, c) => sstep(a, a + .2, t) * (1 - sstep(c - .3, c, t));
+
+/* =====================================================================
+   THE SONG — 128 BPM techno in A minor, synthesized with Web Audio
+   ===================================================================== */
+const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+const EV = []; const ev = (t, fn) => EV.push({ t, fn });
+function engine(ctx) {
+  const sr = ctx.sampleRate, nb = ctx.createBuffer(2, sr * 4, sr), nr = rng(42); for (let ch = 0; ch < 2; ch++) { const d = nb.getChannelData(ch); for (let i = 0; i < d.length; i++) d[i] = nr() * 2 - 1; }
+  const master = ctx.createGain(); master.gain.value = .7; const comp = ctx.createDynamicsCompressor(); comp.threshold.value = -12; comp.ratio.value = 4; comp.attack.value = .003; comp.release.value = .15; master.connect(comp); comp.connect(ctx.destination);
+  const ir = ctx.createBuffer(2, sr * 2.2, sr); for (let ch = 0; ch < 2; ch++) { const d = ir.getChannelData(ch); for (let i = 0; i < d.length; i++) d[i] = (nr() * 2 - 1) * Math.pow(1 - i / d.length, 3); }
+  const verb = ctx.createConvolver(); verb.buffer = ir; const vg = ctx.createGain(); vg.gain.value = .3; verb.connect(vg); vg.connect(master);
+  const dl = ctx.createDelay(1); dl.delayTime.value = BEAT * .75; const fb = ctx.createGain(); fb.gain.value = .35; const dlf = ctx.createBiquadFilter(); dlf.type = 'lowpass'; dlf.frequency.value = 2500; dl.connect(dlf); dlf.connect(fb); fb.connect(dl); const dg = ctx.createGain(); dg.gain.value = .25; dlf.connect(dg); dg.connect(master);
+  const bus = (gn, send, dsend = 0) => { const n = ctx.createGain(); n.gain.value = gn; n.connect(master); const s = ctx.createGain(); s.gain.value = send; n.connect(s); s.connect(verb); if (dsend) { const d = ctx.createGain(); d.gain.value = dsend; n.connect(d); d.connect(dl); } return n; };
+  const duck = ctx.createGain(); duck.gain.value = 1; const duckOut = bus(1, .15, .25); duck.connect(duckOut);
+  const sh = ctx.createWaveShaper(); const cu = new Float32Array(1024); for (let i = 0; i < 1024; i++) { const x = i / 512 - 1; cu[i] = Math.tanh(x * 3); } sh.curve = cu;
+  return { ctx, noise: nb, master, drums: bus(.95, .06), duck, fx: bus(.8, .35), vox: bus(.85, .25, .35), curve: cu };
+}
+const G = (E, v = 0) => { const n = E.ctx.createGain(); n.gain.value = v; return n; };
+const O = (E, type, f, w, d) => { const o = E.ctx.createOscillator(); o.type = type; o.frequency.setValueAtTime(f, w); o.start(w); o.stop(w + d + .05); return o; };
+const N = (E, w, d) => { const s = E.ctx.createBufferSource(); s.buffer = E.noise; s.loop = true; s.start(w, (w * 7.31) % 3.5); s.stop(w + d + .05); return s; };
+const F = (E, type, f, Q = .7) => { const q = E.ctx.createBiquadFilter(); q.type = type; q.frequency.value = f; q.Q.value = Q; return q; };
+const PN = (E, p) => { const n = E.ctx.createStereoPanner(); n.pan.value = p; return n; };
+function perc(gn, w, peak, dec) { gn.gain.setValueAtTime(0, w); gn.gain.linearRampToValueAtTime(peak, w + .003); gn.gain.exponentialRampToValueAtTime(.0001, w + dec); }
+function adsr(gn, w, a, peak, dur, rel) { gn.gain.setValueAtTime(0, w); gn.gain.linearRampToValueAtTime(peak, w + a); gn.gain.setValueAtTime(peak, w + Math.max(a, dur)); gn.gain.linearRampToValueAtTime(0, w + Math.max(a, dur) + rel); }
+function shaper(E) { const s = E.ctx.createWaveShaper(); s.curve = E.curve; return s; }
+
+function kick(E, w, vol = .9) { const o = O(E, 'sine', 160, w, .45), gn = G(E); o.frequency.setValueAtTime(170, w); o.frequency.exponentialRampToValueAtTime(48, w + .09); o.connect(gn); const s = shaper(E); gn.connect(s); const og = G(E, vol * .8); s.connect(og); og.connect(E.drums); perc(gn, w, 1, .42); const c = N(E, w, .02), cf = F(E, 'highpass', 3000), cg = G(E); c.connect(cf); cf.connect(cg); cg.connect(E.drums); perc(cg, w, vol * .35, .015);
+  E.duck.gain.cancelScheduledValues(w); E.duck.gain.setValueAtTime(.25, w); E.duck.gain.linearRampToValueAtTime(1, w + BEAT * .55); }
+function clap(E, w, vol = .4) { const n = N(E, w, .3), bf = F(E, 'bandpass', 1500, 1.4), gn = G(E); n.connect(bf); bf.connect(gn); gn.connect(E.drums); gn.gain.setValueAtTime(0, w); for (let k = 0; k < 3; k++) { gn.gain.setValueAtTime(vol, w + k * .012); gn.gain.exponentialRampToValueAtTime(vol * .2, w + k * .012 + .01); } gn.gain.setValueAtTime(vol * .7, w + .036); gn.gain.exponentialRampToValueAtTime(.0001, w + .22); }
+function hat(E, w, vol = .1, open = false, pan = 0) { const n = N(E, w, .4), hf = F(E, 'highpass', 8000), bp = F(E, 'peaking', 10000, 1), gn = G(E), p = PN(E, pan); bp.gain.value = 6; n.connect(hf); hf.connect(bp); bp.connect(gn); gn.connect(p); p.connect(E.drums); perc(gn, w, vol, open ? .28 : .045); }
+function rim(E, w, vol = .2) { const o = O(E, 'triangle', 1700, w, .05), gn = G(E), bf = F(E, 'bandpass', 2000, 4); o.connect(bf); bf.connect(gn); gn.connect(E.drums); perc(gn, w, vol, .04); }
+function bass(E, w, m, d, vol = .32) { const o = O(E, 'sawtooth', mtof(m), w, d), o2 = O(E, 'square', mtof(m - 12), w, d), lp = F(E, 'lowpass', 380, 4), gn = G(E), g2 = G(E, .5); lp.frequency.setValueAtTime(900, w); lp.frequency.exponentialRampToValueAtTime(260, w + d); o.connect(lp); o2.connect(g2); g2.connect(lp); lp.connect(gn); gn.connect(E.duck); adsr(gn, w, .005, vol, d * .7, .04); }
+function acid(E, w, m, d, acc, slide, cut, res, vol = .2) { const o = O(E, 'sawtooth', mtof(m), w, d + .02); if (slide != null) o.frequency.exponentialRampToValueAtTime(mtof(slide), w + d); const lp = F(E, 'lowpass', cut, res); lp.frequency.setValueAtTime(cut * (acc ? 5 : 2.8), w); lp.frequency.exponentialRampToValueAtTime(Math.max(80, cut), w + (acc ? .18 : .1)); const s = shaper(E), gn = G(E); o.connect(lp); lp.connect(s); s.connect(gn); gn.connect(E.duck); gn.gain.setValueAtTime(0, w); gn.gain.linearRampToValueAtTime(vol * (acc ? 1.35 : 1), w + .004); gn.gain.setValueAtTime(vol * (acc ? 1.1 : .8), w + d * .8); gn.gain.linearRampToValueAtTime(0, w + d + (slide != null ? .02 : 0)); }
+function arp(E, w, m, vol = .07, pan = 0, cut = 3200) { const o = O(E, 'square', mtof(m), w, .2), lp = F(E, 'lowpass', cut, 2), gn = G(E), p = PN(E, pan); o.connect(lp); lp.connect(gn); gn.connect(p); p.connect(E.duck); perc(gn, w, vol, .16); }
+function lead(E, w, m, d, vol = .08) { const lp = F(E, 'lowpass', 2600, 1), gn = G(E); lp.connect(gn); gn.connect(E.duck); adsr(gn, w, .01, vol, d * .85, .08); for (const dt of [-12, 0, 12]) { const o = O(E, 'sawtooth', mtof(m), w, d + .1); o.detune.value = dt; o.connect(lp); } const sq = O(E, 'square', mtof(m - 12), w, d + .1), sg = G(E, .4); sq.connect(sg); sg.connect(lp); }
+function pad(E, w, ms, d, vol = .05, cut = 1200) { const lp = F(E, 'lowpass', cut, .5), gn = G(E); lp.connect(gn); gn.connect(E.duck); adsr(gn, w, .6, vol, d, .8); ms.forEach((m, i) => [-10, 10].forEach(dt => { const o = O(E, 'sawtooth', mtof(m), w, d + .9); o.detune.value = dt + i; o.connect(lp); })); }
+function riser(E, w, d, vol = .25) { const n = N(E, w, d), bf = F(E, 'bandpass', 400, 2), gn = G(E); bf.frequency.setValueAtTime(300, w); bf.frequency.exponentialRampToValueAtTime(9000, w + d); n.connect(bf); bf.connect(gn); gn.connect(E.fx); gn.gain.setValueAtTime(0, w); gn.gain.linearRampToValueAtTime(vol, w + d); gn.gain.linearRampToValueAtTime(0, w + d + .02); const o = O(E, 'sawtooth', 110, w, d), lp = F(E, 'lowpass', 2000), og = G(E); o.frequency.exponentialRampToValueAtTime(1760, w + d); o.connect(lp); lp.connect(og); og.connect(E.fx); og.gain.setValueAtTime(0, w); og.gain.linearRampToValueAtTime(vol * .35, w + d); og.gain.linearRampToValueAtTime(0, w + d + .02); }
+function revCym(E, w, d = BEAT) { const n = N(E, w, d), hf = F(E, 'highpass', 5000), gn = G(E); n.connect(hf); hf.connect(gn); gn.connect(E.fx); gn.gain.setValueAtTime(0, w); gn.gain.exponentialRampToValueAtTime(.3, w + d); gn.gain.linearRampToValueAtTime(0, w + d + .01); }
+function impact(E, w, vol = .7) { const o = O(E, 'sine', 90, w, 2), gn = G(E); o.frequency.exponentialRampToValueAtTime(28, w + 1.5); o.connect(gn); gn.connect(E.fx); perc(gn, w, vol, 1.8); const n = N(E, w, 2.5), hf = F(E, 'highpass', 3500), ng = G(E); n.connect(hf); hf.connect(ng); ng.connect(E.fx); perc(ng, w, vol * .4, 2.4); }
+function blip(E, w, f, vol = .06) { const o = O(E, 'square', f, w, .08), gn = G(E); o.connect(gn); gn.connect(E.fx); perc(gn, w, vol, .07); }
+// formant "HA" — the laughing voice
+function ha(E, w, p, vol = .22, vowel = 'a') { const F1 = vowel === 'a' ? 820 : 320, F2 = vowel === 'a' ? 1250 : 2300, F3 = 2700;
+  const h = N(E, w - .04, .07), hf = F(E, 'bandpass', 1600, 1), hg = G(E); h.connect(hf); hf.connect(hg); hg.connect(E.vox); adsr(hg, w - .04, .02, vol * .5, .02, .03);
+  const o = O(E, 'sawtooth', p, w, .3), gn = G(E); o.frequency.setValueAtTime(p * 1.12, w); o.frequency.exponentialRampToValueAtTime(p * .86, w + .2); const vib = O(E, 'sine', 30, w, .3), vgn = G(E, p * .03); vib.connect(vgn); vgn.connect(o.frequency);
+  for (const [f, q, a] of [[F1, 9, 1], [F2, 12, .6], [F3, 14, .3]]) { const bf = F(E, 'bandpass', f, q), ag = G(E, a * 3); o.connect(bf); bf.connect(ag); ag.connect(gn); }
+  gn.connect(E.vox); gn.gain.setValueAtTime(0, w); gn.gain.linearRampToValueAtTime(vol, w + .02); gn.gain.exponentialRampToValueAtTime(.0001, w + .2); }
+
+// --- arrangement
+const ROOTS = [45, 45, 41, 43];               // A A F G
+const CHORDS = [[69, 72, 76], [69, 72, 76], [65, 69, 72], [67, 71, 74]];
+const ACID = [[0, 1, 0], [0, 0, 0], [12, 1, 0], [0, 0, 1], [3, 0, 0], [0, 1, 0], [15, 0, 1], [12, 0, 0], [0, 1, 0], [7, 0, 0], [0, 0, 1], [10, 1, 0], [12, 0, 0], [0, 0, 0], [3, 1, 1], [5, 0, 0]];
+for (const k of KICKS) ev(k, (E, w) => kick(E, w, .9));
+for (let br = 0; br < BARS; br++) { const t0 = at(br), ci = br % 4, root = ROOTS[ci];
+  const sec = br < 4 ? 'intro' : br < 12 ? 'tetris' : br < 14 ? 'break' : br < 22 ? 'drop' : br < 26 ? 'matrix' : br < 30 ? 'climax' : 'outro';
+  // hats
+  if (br >= 2 && sec !== 'break' && sec !== 'outro') for (let k = 0; k < 16; k++) { if (br < 4 && k % 4 !== 2) continue; const v = k % 4 === 2 ? .12 : k % 2 ? .06 : .035; ev(t0 + k * BEAT / 4, (E, w) => hat(E, w, v, false, Math.sin(k) * .4)); }
+  if ((br >= 6 && br < 12) || (br >= 14 && br < 30)) for (let k = 0; k < 4; k++) ev(t0 + (k + .5) * BEAT, (E, w) => hat(E, w, .09, true, .2));
+  if ((br >= 8 && br < 12) || (br >= 14 && br < 30)) for (const k of [1, 3]) ev(t0 + k * BEAT, (E, w) => clap(E, w, .42));
+  if (sec === 'tetris' || sec === 'drop' || sec === 'climax') for (const k of [3, 7, 11, 14]) ev(t0 + k * BEAT / 4, (E, w) => rim(E, w, .14));
+  // rolling bass on the off-beats
+  if ((br >= 4 && br < 12) || (br >= 14 && br < 30)) for (let k = 0; k < 4; k++) for (const o of [.5, .75]) ev(t0 + (k + o) * BEAT, (E, w) => bass(E, w, root - 12 + (o === .75 && k === 3 ? 12 : 0), BEAT * .22));
+  // acid line
+  if ((br >= 6 && br < 12) || (br >= 14 && br < 30)) { const cut = sec === 'tetris' ? lerp(260, 700, (br - 6) / 6) : sec === 'drop' ? 500 + 600 * (.5 + .5 * Math.sin((br - 14) / 8 * Math.PI * 2)) : sec === 'matrix' ? 1100 : 1500;
+    ACID.forEach(([n, acc, sl], k) => { const nxt = ACID[(k + 1) % 16][0]; const m = 45 - 12 + n + (ci === 2 ? -4 : ci === 3 ? -2 : 0); ev(t0 + k * BEAT / 4, (E, w) => acid(E, w, m, BEAT / 4 * (sl ? 1.02 : .7), acc, sl ? m - n + nxt : null, cut, 14, .16)); }); }
+  // arpeggio + pads
+  if (sec === 'drop' || sec === 'climax' || (sec === 'tetris' && br >= 10)) for (let k = 0; k < 16; k++) { const ch = CHORDS[ci]; const m = ch[[0, 1, 2, 1, 2, 0, 1, 2][k % 8]] + (k >= 8 ? 12 : 0); ev(t0 + k * BEAT / 4, (E, w) => arp(E, w, m, sec === 'tetris' ? .035 : .05, k % 2 ? .5 : -.5)); }
+  if (sec === 'break' || sec === 'matrix') ev(t0, (E, w) => pad(E, w, CHORDS[ci].map(m => m - 12).concat(CHORDS[ci]), BAR, sec === 'break' ? .06 : .04, sec === 'break' ? 900 : 1600));
+  if (sec === 'intro' && br >= 2) for (let k = 0; k < 8; k++) ev(t0 + k * BEAT / 2, (E, w) => blip(E, w, [880, 1320, 1760, 1320][k % 4], .025));
+}
+// tetris sound effects synced to the game
+for (let n = 0; n < (S.breakdown - S.tetris) * 4; n++) { const t0 = at(S.tetris) + n * BEAT; const st = GAME[n]; ev(t0 + BEAT * .72, (E, w) => blip(E, w, 220, .05)); if (st && st.cleared.length) { ev(t0 + BEAT * .74, (E, w) => { [880, 1108, 1318, 1760].slice(0, st.cleared.length + 1).forEach((f, i) => blip(E, w + i * .05, f, .06)); }); } }
+// hook melody in the climax
+{ const HOOK = [[0, 81, .75], [.75, 84, .75], [1.5, 88, .5], [2, 86, 1], [3, 84, .5], [3.5, 83, .5], [4, 79, .75], [4.75, 81, 1.25], [6, 84, .5], [6.5, 83, .5], [7, 76, 1]];
+  for (let rep = 0; rep < 2; rep++) for (const [bt, m, d] of HOOK) ev(at(26) + (rep * 8 + bt) * BEAT, (E, w) => lead(E, w, m - 12, d * BEAT, .06)); }
+// laughs (the visuals open the faces' mouths on these exact hits)
+for (const L of LAUGHS) ev(L.t, (E, w) => ha(E, w, L.p, .2, L.p > 395 ? 'i' : 'a'));
+// transitions & fx
+ev(at(12) - BEAT, (E, w) => revCym(E, w)); ev(at(13), (E, w) => riser(E, w, BAR, .22));
+for (let k = 0; k < 16; k++) ev(at(13) + BAR * .5 + k * BAR / 32, (E, w) => clap(E, w, .08 + k * .015));
+ev(at(14), (E, w) => impact(E, w, .7));
+ev(at(22) - BEAT, (E, w) => revCym(E, w)); ev(at(26) - BEAT, (E, w) => revCym(E, w)); ev(at(26), (E, w) => impact(E, w, .6));
+ev(at(30), (E, w) => impact(E, w, .5));
+ev(at(30) + BEAT, (E, w) => pad(E, w, [57, 64, 69, 72, 76], BAR * 1.6, .05, 1400));
+for (let k = 0; k < 6; k++) ev(at(30) + BEAT * (1 + k * .75), (E, w) => ha(E, w, 300 - k * 20, .12 - k * .015));
+ev(DUR - 1.4, (E, w) => { E.master.gain.setValueAtTime(E.master.gain.value, w); E.master.gain.linearRampToValueAtTime(0, w + 1.35); });
+EV.sort((a, c) => a.t - c.t);
+
+/* ---------- playback / export ---------- */
+let actx = null, AE = null, base = 0, offset = 0, idx = 0, timer = null, playing = false, started = false, pausedT = 0;
+function startAudio(off) { stopAudio(); offset = off; actx = new (window.AudioContext || window.webkitAudioContext)(); AE = engine(actx); base = actx.currentTime + .15; idx = EV.findIndex(e => e.t >= off - .02); if (idx < 0) idx = EV.length;
+  const pump = () => { if (!actx) return; const now = offset + (actx.currentTime - base); while (idx < EV.length && EV[idx].t < now + .6) { const e = EV[idx++]; try { e.fn(AE, Math.max(actx.currentTime + .005, base + e.t - offset)); } catch (err) { console.warn(err); } } }; pump(); timer = setInterval(pump, 50); playing = true; }
+function stopAudio() { if (timer) clearInterval(timer); timer = null; if (actx) { actx.close(); actx = null; } }
+const curT = () => actx && playing ? offset + Math.max(0, actx.currentTime - base) : pausedT;
+async function renderAudio() { const sr = 48000, oc = new OfflineAudioContext(2, Math.ceil(sr * DUR), sr), E = engine(oc); for (const e of EV) e.fn(E, Math.max(0, e.t)); const buf = await oc.startRendering();
+  const n = buf.length, ab = new ArrayBuffer(44 + n * 4), dv = new DataView(ab), Wr = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  Wr(0, 'RIFF'); dv.setUint32(4, 36 + n * 4, true); Wr(8, 'WAVE'); Wr(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 2, true); dv.setUint32(24, sr, true); dv.setUint32(28, sr * 4, true); dv.setUint16(32, 4, true); dv.setUint16(34, 16, true); Wr(36, 'data'); dv.setUint32(40, n * 4, true);
+  const L = buf.getChannelData(0), R = buf.getChannelData(1); let o = 44; for (let i = 0; i < n; i++) { dv.setInt16(o, clamp(L[i], -1, 1) * 32767, true); dv.setInt16(o + 2, clamp(R[i], -1, 1) * 32767, true); o += 4; }
+  const by = new Uint8Array(ab); let s = ''; for (let i = 0; i < by.length; i += 0x8000) s += String.fromCharCode.apply(null, by.subarray(i, i + 0x8000)); return btoa(s); }
+
+if (RENDER) window.__film = { duration: DUR, frame: t => { frame(t); return true; }, audio: renderAudio, ready: Promise.resolve(true) };
+else {
+  const barEl = document.querySelector('#bar i'), pp = document.getElementById('pp');
+  const play = from => { startAudio(from); started = true; document.getElementById('start').hidden = true; pp.textContent = 'Pausa'; };
+  document.getElementById('play').onclick = () => play(0); document.getElementById('rs').onclick = () => play(0);
+  pp.onclick = () => { if (!started) return play(0); if (playing) { pausedT = curT(); playing = false; actx && actx.suspend(); pp.textContent = 'Riprendi'; } else if (actx && pausedT < DUR - .05) { actx.resume(); playing = true; pp.textContent = 'Pausa'; } else play(0); };
+  document.getElementById('bar').onclick = e => { const r = e.currentTarget.getBoundingClientRect(); play(clamp((e.clientX - r.left) / r.width) * DUR); };
+  const loop = () => { requestAnimationFrame(loop); let t = started ? curT() : at(16) + .3; if (started && playing && t >= DUR) { playing = false; pausedT = DUR - .01; t = pausedT; stopAudio(); pp.textContent = 'Da capo'; } frame(Math.min(t, DUR - .01)); barEl.style.width = (clamp(t / DUR) * 100) + '%'; };
+  loop();
+}
+</script>
+</body>
+</html>
